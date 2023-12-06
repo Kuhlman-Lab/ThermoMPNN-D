@@ -1,21 +1,32 @@
 import pandas as pd
-from tqdm import tqdm
 import os
 import torch
-import torch.nn as nn
 from omegaconf import OmegaConf
 from Bio.PDB import PDBParser
 
 import sys
 sys.path.append('../')
-from datasets import Mutation
-from train_thermompnn import TransferModelPL
-from protein_mpnn_utils import tied_featurize, alt_parse_PDB
+sys.path.append('./')
+from protein_mpnn_utils import parse_PDB
 from thermompnn_benchmarking import get_trained_model
-from SSM import get_ssm_mutations
+
+import time
+from dataclasses import dataclass
+from typing import Optional
 
 
 ALPHABET = 'ACDEFGHIKLMNPQRSTVWYX'
+
+
+@dataclass
+class Mutation:
+    position: list[int]
+    wildtype: list[str]
+    mutation: list[str]
+    chain: list[str]
+    chain_position: list[int]
+    ddG: Optional[float] = None
+    pdb: Optional[str] = ''
 
 
 def get_chains(pdb):
@@ -23,6 +34,34 @@ def get_chains(pdb):
   structure = parser.get_structure('', pdb)
   chains = [c.id for c in structure.get_chains()]
   return chains
+
+
+def get_ssm_mutations(pdb):
+    # make mutation list for SSM run - use ALL chains
+    mutation_list = []
+    chain_seqs = [k for k in pdb.keys() if k.startswith('seq_chain_')]
+    total_seq = pdb['seq']
+    total_offset = 0
+    for cs in chain_seqs:
+        seq = pdb[cs]
+        for seq_pos in range(len(seq)):
+            assert total_seq[total_offset + seq_pos] == seq[seq_pos]
+            wtAA = seq[seq_pos]
+            # check for missing residues
+            if wtAA != '-':
+                # add each mutation option
+                for mutAA in ALPHABET[:-1]:
+                    mutation_list.append(Mutation(position=[int(total_offset + seq_pos)], 
+                                                  wildtype=[wtAA], 
+                                                  mutation=[mutAA], 
+                                                  chain=[cs[-1]], 
+                                                  chain_position=[int(seq_pos)]))
+                    # mutation_list.append(wtAA + str(total_offset + seq_pos) + mutAA)
+            else:
+                mutation_list.append(None)
+        total_offset += len(seq)
+    return mutation_list
+
 
 
 def main(cfg, args):
@@ -34,6 +73,10 @@ def main(cfg, args):
             'learn_rate': 0.001,
             'epochs': 100,
             'lr_schedule': True,
+        },
+        'data': {
+            'TR': False,
+            'mut_types': ['single'],
         },
         'model': {
             'hidden_dims': [64, 32],
@@ -67,41 +110,38 @@ def main(cfg, args):
         model = model.eval()
         model = model.cuda()
         for dataset_name, dataset in datasets.items():
-            if len(args.chain) < 1:  # if unspecified, take first chain
-                chain = get_chains(input_pdb)[0]
+            prep_start = time.time()
+            if len(args.chain) < 1:  # if unspecified, take ALL chains
+                chain = get_chains(input_pdb)
             else:
                 chain = args.chain
-            mut_pdb = alt_parse_PDB(input_pdb, chain)
+            print(input_pdb, chain)
+            mut_pdb = parse_PDB(input_pdb, chain)
             mutation_list = get_ssm_mutations(mut_pdb[0])
-            final_mutation_list = []
 
-            # build into list of Mutation objects
-            for n, m in enumerate(mutation_list):
-                if m is None:
-                    final_mutation_list.append(None)
-                    continue
-                m = m.strip()  # clear whitespace
-                wtAA, position, mutAA = str(m[0]), int(str(m[1:-1])), str(m[-1])
+            prep_end = time.time()
+            inf_start = time.time()
+            print(mutation_list)
+            print('Calculating %s predictions for PDB %s' % (str(len(mutation_list)), mutation_list[0].pdb.strip('.pdb')))
+            pred, _ = model(mut_pdb, mutation_list)
+            inf_end = time.time()
 
-                assert wtAA in ALPHABET, f"Wild type residue {wtAA} invalid, please try again with one of the following options: {ALPHABET}"
-                assert mutAA in ALPHABET, f"Wild type residue {mutAA} invalid, please try again with one of the following options: {ALPHABET}"
-                mutation_obj = Mutation(position=position, wildtype=wtAA, mutation=mutAA,
-                                        ddG=None, pdb=mut_pdb[0]['name'])
-                final_mutation_list.append(mutation_obj)
-
-            pred, _ = model(mut_pdb, final_mutation_list)
-
-            for mut, out in zip(final_mutation_list, pred):
+            for mut, out in zip(mutation_list, pred):
                 if mut is not None:
-                    col_list = ['ddG_pred', 'position', 'wildtype', 'mutation', 'pdb', 'chain']
-                    val_list = [out["ddG"].cpu().item(), mut.position, mut.wildtype,
-                                mut.mutation, mut.pdb.strip('.pdb'), chain]
+                    col_list = ['ddG_pred', 'position', 'wildtype', 'mutation', 'pdb', 'chain', 'chain_position']
+                    val_list = [out["ddG"].cpu().item(), mut.position[0] + 1, mut.wildtype[0],
+                                mut.mutation[0], mut.pdb.strip('.pdb'), mut.chain[0], mut.chain_position[0] + 1]
                     for col, val in zip(col_list, val_list):
                         raw_pred_df.loc[row, col] = val
 
                     raw_pred_df.loc[row, 'Model'] = name
                     raw_pred_df.loc[row, 'Dataset'] = dataset_name
                     row += 1
+            
+            prep_time = round(prep_end - prep_start, 3)
+            print(f'Preprocessing time: {prep_time} seconds')
+            inf_time = round(inf_end - inf_start, 3)
+            print(f'Inference time: {inf_time} seconds')
 
     print(raw_pred_df)
     raw_pred_df.to_csv("ThermoMPNN_inference_%s.csv" % pdb_id)
@@ -112,8 +152,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--pdb', type=str, default='', help='Input PDB to use for custom inference')
-    parser.add_argument('--chain', type=str, default='A', help='Chain in input PDB to use.')
-    parser.add_argument('--model_path', type=str, default='', help='filepath to model to use for inference')
+    parser.add_argument('--chain', type=list, nargs='+', default=[], help='Chain in input PDB to use.')
+    parser.add_argument('--model_path', type=str, default='../models/thermoMPNN_default.py', help='filepath to model to use for inference')
 
     args = parser.parse_args()
     cfg = OmegaConf.load("../local.yaml")

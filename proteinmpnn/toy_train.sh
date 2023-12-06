@@ -1,0 +1,22 @@
+#!/bin/bash
+#SBATCH -J ProteinMPNN_000_0
+#SBATCH -t 3-00:00:00
+#SBATCH --partition=volta-gpu
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=128G
+#SBATCH --gres=gpu:1
+#SBATCH --output=R-%x.%j.out
+#SBATCH --error=R-%x.%j.err
+#SBATCH --qos=gpu_access
+
+module load gcc/11.2.0
+module load cuda/11.8
+
+cd /proj/kuhl_lab/users/dieckhau/ThermoMPNN/proteinmpnn/ 
+
+/nas/longleaf/home/dieckhau/miniconda3/envs/proteinMPNN/bin/python training.py \
+	--path_for_training_data /proj/kuhl_lab/datasets/pdb_2021aug02_sample \
+	--path_for_outputs toy_ProteinMPNN_000_0 \
+	--backbone_noise 0.0 \
+	--num_epochs 25
+

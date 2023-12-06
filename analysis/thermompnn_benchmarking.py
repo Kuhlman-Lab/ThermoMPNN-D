@@ -75,7 +75,7 @@ def get_metrics():
     }
 
 
-def get_trained_model(model_name, config, checkpt_dir='models/', override_custom=False):
+def get_trained_model(model_name, config, checkpt_dir='checkpoints/', override_custom=False):
     if override_custom:
         return TransferModelPL.load_from_checkpoint(model_name, cfg=config).model
     else:
@@ -93,9 +93,14 @@ def run_prediction_default(name, model, dataset_name, dataset, results):
         "ddG": get_metrics(),
     }
     print('Testing Model %s on dataset %s' % (name, dataset_name))
-
+    skipped = 0
     for i, batch in enumerate(tqdm(dataset)):
         pdb, mutations = batch
+        if pdb is None:  # skip missing pdbs
+            print('Skipping batch due to missing PDB')
+            skipped += 1
+            continue
+        
         pred, _ = model(pdb, mutations)
 
         for mut, out in zip(mutations, pred):
@@ -106,6 +111,8 @@ def run_prediction_default(name, model, dataset_name, dataset, results):
 
         if max_batches is not None and i >= max_batches:
             break
+        # print(metrics['ddG']['pearson'].compute().cpu().item(), '***')
+        # quit()
     column = {
         "Model": name,
         "Dataset": dataset_name,
@@ -118,6 +125,8 @@ def run_prediction_default(name, model, dataset_name, dataset, results):
             except ValueError:
                 pass
     results.append(column)
+    if skipped != 0:
+        print('SKIPPED %s batches due to missing PDBs' % (skipped))
     return results
 
 
@@ -131,9 +140,18 @@ def run_prediction_keep_preds(name, model, dataset_name, dataset, results, centr
     metrics = {
         "ddG": get_metrics(),
     }
+    skipped = 0
     print('Running model %s on dataset %s' % (name, dataset_name))
+    # from torch.utils.data import DataLoader
+    # loader = DataLoader(dataset, collate_fn=lambda x: x, shuffle=False, num_workers=8, batch_size=None)
     for i, batch in enumerate(tqdm(dataset)):
         mut_pdb, mutations = batch
+        # print(mut_pdb, mutations)
+        if mut_pdb is None:  # skip missing pdbs
+            print('Skipping batch due to missing PDB')
+            skipped += 1
+            continue
+        
         pred, _ = model(mut_pdb, mutations)
 
         if centrality:
@@ -170,6 +188,7 @@ def run_prediction_keep_preds(name, model, dataset_name, dataset, results, centr
 
         if max_batches is not None and i >= max_batches:
             break
+        # break  # TODO remove
     column = {
         "Model": name,
         "Dataset": dataset_name,
@@ -181,6 +200,9 @@ def run_prediction_keep_preds(name, model, dataset_name, dataset, results, centr
             except ValueError:
                 pass
     results.append(column)
+    
+    if skipped != 0:
+        print('Skipped %s batches due to missing PDBs' % (skipped))
     raw_pred_df.to_csv(name + '_' + dataset_name + "_raw_preds.csv")
     del raw_pred_df
 
@@ -191,11 +213,14 @@ def main(cfg, args):
 
     # define config for model loading
     config = {
+        'data': {
+            'TR': False,
+            'mut_types': ['single']
+        },
         'training': {
             'num_workers': 8,
             'learn_rate': 0.001,
             'epochs': 100,
-            'lr_schedule': True,
         },
         'model': {
             'hidden_dims': [64, 32],
@@ -203,38 +228,154 @@ def main(cfg, args):
             'num_final_layers': 2,
             'freeze_weights': True,
             'load_pretrained': True,
+            'single_target': False,
+            # 'mutant_embedding': False,
+            # 'mlp_first': False,
             'lightattn': True,
-            'lr_schedule': True,
         }
     }
 
     cfg = OmegaConf.merge(config, cfg)
+    # from copy import deepcopy
+
+    # cfg_ipmp_000 = deepcopy(cfg)
+    # cfg_ipmp_000.model.version = 'ProteinIPMP_000_0.pt'
+
+    # cfg_ipmp_002 = deepcopy(cfg)
+    # cfg_ipmp_002.model.version = 'ProteinIPMP_002_0.pt'
+
+    # cfg_ipmp_010 = deepcopy(cfg)
+    # cfg_ipmp_010.model.version = 'ProteinIPMP_010_0.pt'
+
+    # cfg_ipmp_020 = deepcopy(cfg)
+    # cfg_ipmp_020.model.version = 'ProteinIPMP_020_0.pt'
+
+    # cfg_ipmp_030 = deepcopy(cfg)
+    # cfg_ipmp_030.model.version = 'ProteinIPMP_030_0.pt'
+
+    # cfg_mpnn_000 = deepcopy(cfg)
+    # cfg_mpnn_000.model.version = 'ProteinMPNN_000_0.pt'
+
+    # cfg_mpnn_002 = deepcopy(cfg)
+    # cfg_mpnn_002.model.version = 'ProteinMPNN_002_0.pt'
+
+    # cfg_mpnn_010 = deepcopy(cfg)
+    # cfg_mpnn_010.model.version = 'ProteinMPNN_010_0.pt'
+
+    # cfg_mpnn_020 = deepcopy(cfg)
+    # cfg_mpnn_020.model.version = 'ProteinMPNN_020_0.pt'
+
+    # cfg_mpnn_030 = deepcopy(cfg)
+    # cfg_mpnn_030.model.version = 'ProteinMPNN_030_0.pt'
+
+
 
     models = {
-        'ProteinMPNN': ProteinMPNNBaseline(cfg, version='v_48_020.pt'),
-        "ThermoMPNN": get_trained_model(model_name='thermoMPNN_default.pt',
-                                        config=cfg)
+        # 'ProteinMPNN': ProteinMPNNBaseline(cfg, version='v_48_020.pt'),
+        "ThermoMPNN": get_trained_model(model_name='thermoMPNN_default.pt', config=cfg, checkpt_dir='models/'),
+        # "ThermoMPNN-newPDBs": get_trained_model(model_name='aug_pdb_ThermoMPNN_epoch=25_val_ddG_spearman=0.79.ckpt', config=cfg, checkpt_dir='checkpoints/'),
+
+        # "NOSUB": get_trained_model(model_name="MLP_LA_NOSUB_2_epoch=30_val_ddG_spearman=0.79.ckpt", config=cfg, checkpt_dir='/nas/longleaf/home/dieckhau/protein-stability/enzyme-stability/checkpoints/')
+        
+        # "ThermoMPNN-order-invar": get_trained_model(model_name='double_mlp_init_wMUTEMB_singletarget_epoch=01_val_ddG_spearman=0.59.ckpt', 
+        #                                             config=cfg),
+
+        # "ThermoMPNN-dm": get_trained_model(model_name='double_concat_epoch=34_val_ddG_spearman=0.7.ckpt',
+        #                                 config=cfg, checkpt_dir='checkpoints/'),
+        # "ThermoMPNN-dm-flip": get_trained_model(model_name='double_concat_valflip_epoch=37_val_ddG_spearman=0.46.ckpt',
+        #                                 config=cfg, checkpt_dir='checkpoints/'),                               
+        # "MPNN_000": get_trained_model(model_name='MPNN_000_0_epoch=60_val_ddG_spearman=0.77.ckpt',
+        #                                 config=cfg_mpnn_000, checkpt_dir='checkpoints/'),
+        # "MPNN_002": get_trained_model(model_name='MPNN_002_0_epoch=36_val_ddG_spearman=0.78.ckpt',
+        #                                 config=cfg_mpnn_002, checkpt_dir='checkpoints/'),
+        # "MPNN_010": get_trained_model(model_name='MPNN_010_0_epoch=20_val_ddG_spearman=0.79.ckpt',
+        #                     config=cfg_mpnn_010, checkpt_dir='checkpoints/'),
+        # "MPNN_020": get_trained_model(model_name='MPNN_020_0_epoch=27_val_ddG_spearman=0.8.ckpt',
+        #                     config=cfg_mpnn_020, checkpt_dir='checkpoints/'),
+        # "MPNN_030": get_trained_model(model_name='MPNN_030_0_epoch=46_val_ddG_spearman=0.79.ckpt',
+        #                     config=cfg_mpnn_030, checkpt_dir='checkpoints/'),       
+        # "IPMP_000": get_trained_model(model_name='IPMP_000_0_epoch=31_val_ddG_spearman=0.78.ckpt',
+        #                                 config=cfg_ipmp_000, checkpt_dir='checkpoints/'),
+        # "IPMP_002": get_trained_model(model_name='IPMP_002_0_epoch=58_val_ddG_spearman=0.78.ckpt',
+        #                                 config=cfg_ipmp_002, checkpt_dir='checkpoints/'),
+        # "IPMP_010": get_trained_model(model_name='IPMP_010_0_epoch=33_val_ddG_spearman=0.78.ckpt',
+        #                     config=cfg_ipmp_010, checkpt_dir='checkpoints/'),
+        # "IPMP_020": get_trained_model(model_name='IPMP_020_0_epoch=40_val_ddG_spearman=0.79.ckpt',
+        #                     config=cfg_ipmp_020, checkpt_dir='checkpoints/'),
+        # "IPMP_030": get_trained_model(model_name='IPMP_030_0_epoch=50_val_ddG_spearman=0.79.ckpt',
+        #                     config=cfg_ipmp_030, checkpt_dir='checkpoints/'),  
+
+        # "ThermoMPNN_CV0": get_trained_model(model_name='thermoMPNN_CV0.pt', config=cfg, checkpt_dir='models/'),
+        # "ThermoMPNN_CV1": get_trained_model(model_name='thermoMPNN_CV1.pt', config=cfg, checkpt_dir='models/'),
+        # "ThermoMPNN_CV2": get_trained_model(model_name='thermoMPNN_CV2.pt', config=cfg, checkpt_dir='models/'),
+        # "ThermoMPNN_CV3": get_trained_model(model_name='thermoMPNN_CV3.pt', config=cfg, checkpt_dir='models/'),
+        # "ThermoMPNN_CV4": get_trained_model(model_name='thermoMPNN_CV4.pt', config=cfg, checkpt_dir='models/'),
 
     }
+    from datasets import MegaScaleDatasetExperimental
 
-    misc_data_loc = '/nas/longleaf/home/dieckhau/protein-stability/enzyme-stability/data'
-    datasets = {
+    # to load megascale csvs from alternate location
+    # cfg.data_loc.megascale_pdbs = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/structure_studies/megascale-all/af2/'
+    cfg.data_loc.fireprot_pdbs = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/structure_studies/fireprot-HF/af2/'
+
+    misc_data_loc = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data'
+    
+    datasets = {}
+    pdb = '1QND'
+    for n in range(1, 21):
+        datasets[pdb + '_' + str(n)] = FireProtDataset(cfg, 'homologue-free', model_no=n, pdb_current=pdb)
+    
+    # datasets = {
+        # "Megascale-train": MegaScaleDataset(cfg, "train"),
+        # "Megascale-val": MegaScaleDataset(cfg, "val"),
         # "Megascale-test": MegaScaleDataset(cfg, "test"),
+        
+        # testing of standard (AF2 & Rosetta mixture), AF2 only, and Experimental structure performance
+        # "Megascale-test-CV0": MegaScaleDataset(cfg, "cv_test_0"),
+        # "Megascale-test-af2-CV0": MegaScaleDataset(cfg, "cv_test_0"),
+        # "Megascale-test-exp-CV0": MegaScaleDatasetExperimental(cfg, "cv_test_0"),
+        
+        # "Megascale-test-CV1": MegaScaleDataset(cfg, "cv_test_1"),
+        # "Megascale-test-af2-CV1": MegaScaleDataset(cfg, "cv_test_1"),
+        # "Megascale-test-exp-CV1": MegaScaleDatasetExperimental(cfg, "cv_test_1"),
+        
+        # "Megascale-test-CV2": MegaScaleDataset(cfg, "cv_test_2"),
+        # "Megascale-test-af2-CV2": MegaScaleDataset(cfg, "cv_test_2"),
+        # "Megascale-test-exp-CV2": MegaScaleDatasetExperimental(cfg, "cv_test_2"),
+        
+        # "Megascale-test-CV3": MegaScaleDataset(cfg, "cv_test_3"),
+        # "Megascale-test-af2-CV3": MegaScaleDataset(cfg, "cv_test_3"),
+        # "Megascale-test-exp-CV3": MegaScaleDatasetExperimental(cfg, "cv_test_3"),
+        
+        # "Megascale-test-CV4": MegaScaleDataset(cfg, "cv_test_4"),
+        # "Megascale-test-af2-CV4": MegaScaleDataset(cfg, "cv_test_4"),
+        # "Megascale-test-exp-CV4": MegaScaleDatasetExperimental(cfg, "cv_test_4"),
+        
         # "Fireprot-test": FireProtDataset(cfg, "test"),
 
-        # "Fireprot-homologue-free": FireProtDataset(cfg, "homologue-free"),
-        "P53": ddgBenchDataset(cfg, pdb_dir=os.path.join(misc_data_loc, 'protddg-bench-master/P53/pdbs'),
-                               csv_fname=os.path.join(misc_data_loc, 'protddg-bench-master/P53/p53_clean.csv')),
-        "MYOGLOBIN": ddgBenchDataset(cfg, pdb_dir=os.path.join(misc_data_loc, 'protddg-bench-master/MYOGLOBIN/pdbs'),
-                               csv_fname=os.path.join(misc_data_loc, 'protddg-bench-master/MYOGLOBIN/myoglobin_clean.csv')),
+        # "Fireprot-homologue-free": FireProtDataset(cfg, "homologue-free", model_no=1, pdb_current='2ABD'),
 
-        "SSYM_dir": ddgBenchDataset(cfg, pdb_dir=os.path.join(misc_data_loc, 'protddg-bench-master/SSYM/pdbs'),
-                               csv_fname=os.path.join(misc_data_loc, 'protddg-bench-master/SSYM/ssym-5fold_clean_dir.csv')),
-        "SSYM_inv": ddgBenchDataset(cfg, pdb_dir=os.path.join(misc_data_loc, 'protddg-bench-master/SSYM/pdbs'),
-                               csv_fname=os.path.join(misc_data_loc, 'protddg-bench-master/SSYM/ssym-5fold_clean_inv.csv')),
-        "S669": ddgBenchDataset(cfg, pdb_dir=os.path.join(misc_data_loc, 'S669/pdbs'),
-                               csv_fname=os.path.join(misc_data_loc, 'S669/s669_clean_dir.csv')),
-    }
+
+        # "P53": ddgBenchDataset(cfg, pdb_dir=os.path.join(misc_data_loc, 'protddg-bench-master/P53/pdbs'),
+        #                        csv_fname=os.path.join(misc_data_loc, 'protddg-bench-master/P53/p53_clean.csv')),
+        
+        # "P53-rev": ddgBenchDataset(cfg, pdb_dir=os.path.join(misc_data_loc, 'protddg-bench-master/P53/pdbs'),
+        #                        csv_fname=os.path.join(misc_data_loc, 'protddg-bench-master/P53/p53_clean.csv'), flip=True),
+        
+        # "MYOGLOBIN": ddgBenchDataset(cfg, pdb_dir=os.path.join(misc_data_loc, 'protddg-bench-master/MYOGLOBIN/pdbs'),
+        #                        csv_fname=os.path.join(misc_data_loc, 'protddg-bench-master/MYOGLOBIN/myoglobin_clean.csv')),
+        # "MYOGLOBIN-rev": ddgBenchDataset(cfg, pdb_dir=os.path.join(misc_data_loc, 'protddg-bench-master/MYOGLOBIN/pdbs'),
+        #                        csv_fname=os.path.join(misc_data_loc, 'protddg-bench-master/MYOGLOBIN/myoglobin_clean.csv'), flip=True),
+
+        # "SSYM_dir": ddgBenchDataset(cfg, pdb_dir=os.path.join(misc_data_loc, 'protddg-bench-master/SSYM/pdbs'),
+        #                        csv_fname=os.path.join(misc_data_loc, 'protddg-bench-master/SSYM/ssym-5fold_clean_dir.csv')),
+        # "SSYM_inv": ddgBenchDataset(cfg, pdb_dir=os.path.join(misc_data_loc, 'protddg-bench-master/SSYM/pdbs'),
+        #                        csv_fname=os.path.join(misc_data_loc, 'protddg-bench-master/SSYM/ssym-5fold_clean_inv.csv')),
+        # "S669": ddgBenchDataset(cfg, pdb_dir=os.path.join(misc_data_loc, 'S669/pdbs'),
+        #                        csv_fname=os.path.join(misc_data_loc, 'S669/s669_clean_dir.csv')),
+    # }
+
+    # quit()
 
     results = []
 
@@ -243,6 +384,7 @@ def main(cfg, args):
         model = model.cuda()
         for dataset_name, dataset in datasets.items():
             if args.keep_preds:
+                print('Keeping preds!')
                 results = run_prediction_keep_preds(name, model, dataset_name, dataset, results, centrality=args.centrality)
             else:
                 results = run_prediction_default(name, model, dataset_name, dataset, results)

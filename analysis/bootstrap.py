@@ -37,7 +37,7 @@ def main(args):
         target = torch.Tensor(sample.ddG_true.values)
         preds = torch.Tensor(sample.ddG_pred.values)
 
-        if args.gpu == 'y':
+        if args.gpu:
             target = target.to('cuda')
             preds = preds.to('cuda')
 
@@ -57,7 +57,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('-i', type=str, help='csv input filename')
 parser.add_argument('-o', type=str, help='csv output filename')
 parser.add_argument("-it", type=int, help='iterations to run bootstrapping')
-parser.add_argument('-gpu', type=str, default='y', help='use gpu or no?')
+parser.add_argument('-gpu', action='store_true', help='use gpu or no?')
 
 args = parser.parse_args()
 main(args)

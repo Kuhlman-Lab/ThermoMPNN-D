@@ -128,6 +128,8 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# henry specific custom files and data
+vanilla_model_weights/
 data
 lightning_logs
 checkpoints
@@ -136,9 +138,11 @@ artifacts
 extra_utils
 .idea/
 preprocessing/.ipynb_checkpoints
+configs/
+proteinmpnn/models
 
 # pymol smh
 *.cif
 
 jobs
-local.yaml
+# local.yaml

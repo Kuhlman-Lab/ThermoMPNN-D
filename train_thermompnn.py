@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
-from torchmetrics import MeanSquaredError, R2Score, SpearmanCorrCoef, PearsonCorrCoef
+from torchmetrics import MeanSquaredError, R2Score, SpearmanCorrCoef
 from omegaconf import OmegaConf
 
 from transfer_model import TransferModel
@@ -31,6 +31,7 @@ class TransferModelPL(pl.LightningModule):
         super().__init__()
         self.model = TransferModel(cfg)
 
+        self.cfg = cfg
         self.learn_rate = cfg.training.learn_rate
         self.mpnn_learn_rate = cfg.training.mpnn_learn_rate if 'mpnn_learn_rate' in cfg.training else None
         self.lr_schedule = cfg.training.lr_schedule if 'lr_schedule' in cfg.training else False
@@ -90,17 +91,20 @@ class TransferModelPL(pl.LightningModule):
             self.learn_rate /= 10.
             print('New second-stage learning rate: ', self.learn_rate)
 
-        if not cfg.model.freeze_weights: # fully unfrozen ProteinMPNN
+        if not self.cfg.model.freeze_weights: # fully unfrozen ProteinMPNN
             param_list = [{"params": self.model.prot_mpnn.parameters(), "lr": self.mpnn_learn_rate}]
         else: # fully frozen MPNN
             param_list = []
 
-        if self.model.lightattn:  # adding light attention parameters
+        if self.model.lightattn or self.model.multiheadattn:  # adding light attention parameters
             if self.stage == 2:
                 param_list.append({"params": self.model.light_attention.parameters(), "lr": 0.})
             else:
                 param_list.append({"params": self.model.light_attention.parameters()})
 
+        self.mlp_first = self.cfg.model.mlp_first if 'mlp_first' in cfg.model else False
+        if self.mlp_first:
+            param_list.append({"params": self.model.init_mlp.parameters()})
 
         mlp_params = [
             {"params": self.model.both_out.parameters()},
@@ -121,14 +125,27 @@ class TransferModelPL(pl.LightningModule):
             return opt
 
 
+
 def train(cfg):
     print('Configuration:\n', cfg)
+
+    siamese = cfg.training.siamese if 'siamese' in cfg.training else False
+    if siamese:
+        from siamese import run_siamese_training
+        run_siamese_training(cfg)
+        quit()
+
+    batched = cfg.training.batched if 'batched' in cfg.training else False
+    if batched:
+        from batched_thermompnn import run_batched_training
+        run_batched_training(cfg)
+        quit()
 
     if 'project' in cfg:
         wandb.init(project=cfg.project, name=cfg.name)
     else:
         cfg.name = 'test'
-
+        
     # load the specified dataset
     if len(cfg.datasets) == 1: # one dataset training
         dataset = cfg.datasets[0]
@@ -145,6 +162,7 @@ def train(cfg):
         elif dataset == 'megascale':
                 train_dataset = MegaScaleDataset(cfg, "train")
                 val_dataset = MegaScaleDataset(cfg, "val")
+
         else:
             raise ValueError("Invalid dataset specified!")
     else:
@@ -165,7 +183,7 @@ def train(cfg):
     filename = cfg.name + '_{epoch:02d}_{val_ddG_spearman:.02}'
     monitor = 'val_ddG_spearman'
     checkpoint_callback = ModelCheckpoint(monitor=monitor, mode='max', dirpath='checkpoints', filename=filename)
-    logger = WandbLogger(project=cfg.project, name="test", log_model="all") if 'project' in cfg else None
+    logger = WandbLogger(project=cfg.project, name="test", log_model=False) if 'project' in cfg else None
     max_ep = cfg.training.epochs if 'epochs' in cfg.training else 100
 
     trainer = pl.Trainer(callbacks=[checkpoint_callback], logger=logger, log_every_n_steps=10, max_epochs=max_ep,

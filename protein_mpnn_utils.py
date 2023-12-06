@@ -13,6 +13,7 @@ import torch.nn.functional as F
 import random
 import itertools
 import re
+from proteinmpnn.model_utils import IPMPDecoder, IPMPEncoder
 
 
 # A number of functions/classes are adopted from: https://github.com/jingraham/neurips19-graph-protein-design
@@ -84,7 +85,6 @@ def parse_PDB_biounits(x, atoms=['N', 'CA', 'C'], chain=None):
                     resa, resn = resn[-1], int(resn[:-1]) - 1
                 else:
                     resa, resn = "", int(resn) - 1
-                #         resn = int(resn)
                 if resn < min_resn:
                     min_resn = resn
                 if resn > max_resn:
@@ -140,12 +140,6 @@ def parse_PDB(path_to_pdb, input_chain_list=None, ca_only=False, side_chains=Fal
         my_dict = {}
         s = 0
         concat_seq = ''
-        concat_N = []
-        concat_CA = []
-        concat_C = []
-        concat_O = []
-        concat_mask = []
-        coords_dict = {}
         for letter in chain_alphabet:
             if ca_only:
                 sidechain_atoms = ['CA']
@@ -248,10 +242,10 @@ def alt_parse_PDB_biounits(x, atoms=['N', 'CA', 'C'], chain=None):
 
                 if atom not in xyz[resn][resa]:
                     xyz[resn][resa][atom] = np.array([x, y, z])
-                # print(resn_list)
+
     # convert to numpy arrays, fill in missing values
     seq_, xyz_ = [], []
-    # print(seq)
+
     try:
         for resn in range(min_resn, max_resn + 1):
             if resn in seq:
@@ -298,12 +292,6 @@ def alt_parse_PDB(path_to_pdb, input_chain_list=None, ca_only=False, side_chains
         my_dict['resn_list'] = []
         s = 0
         concat_seq = ''
-        concat_N = []
-        concat_CA = []
-        concat_C = []
-        concat_O = []
-        concat_mask = []
-        coords_dict = {}
         for letter in chain_alphabet:
             if ca_only:
                 sidechain_atoms = ['CA']
@@ -544,8 +532,11 @@ def tied_featurize(batch, device, chain_dict, fixed_position_dict=None, omit_AA_
 
         m_pad = np.pad(m, [[0, L_max - l]], 'constant', constant_values=(0.0,))
         m_pos_pad = np.pad(m_pos, [[0, L_max - l]], 'constant', constant_values=(0.0,))
-        omit_AA_mask_pad = np.pad(np.concatenate(omit_AA_mask_list, 0), [[0, L_max - l]], 'constant',
-                                  constant_values=(0.0,))
+        
+        # NOTE: this causes size mismatches b/c it pads the seq dim as well as the length dim
+        # omit_AA_mask_pad = np.pad(np.concatenate(omit_AA_mask_list, 0), [[0, L_max - l]], 'constant', constant_values=(0.0,))
+        omit_AA_mask_pad = np.pad(np.concatenate(omit_AA_mask_list, 0), [[0, L_max - l], [0, 0]], 'constant', constant_values=(0.0,))
+        
         chain_M[i, :] = m_pad
         chain_M_pos[i, :] = m_pos_pad
         omit_AA_mask[i,] = omit_AA_mask_pad
@@ -858,22 +849,36 @@ class DecLayer(nn.Module):
 
     def forward(self, h_V, h_E, mask_V=None, mask_attend=None):
         """ Parallel computation of full transformer layer """
-
+        # print('h_V', h_V.shape)
+        # print('h_E', h_E.shape)
         # Concatenate h_V_i to h_E_ij
         h_V_expand = h_V.unsqueeze(-2).expand(-1, -1, h_E.size(-2), -1)
+        # print('h_V_expand', h_V_expand.shape)
         h_EV = torch.cat([h_V_expand, h_E], -1)
+        # print('h_EV', h_EV.shape)
 
+        # use MLP to construct message
         h_message = self.W3(self.act(self.W2(self.act(self.W1(h_EV)))))
+        # print('h_message', h_message.shape)
+
+        # optional: attend to message
         if mask_attend is not None:
             h_message = mask_attend.unsqueeze(-1) * h_message
+
+        # aggregate message?
         dh = torch.sum(h_message, -2) / self.scale
+        # print('dh', dh.shape)
 
         h_V = self.norm1(h_V + self.dropout1(dh))
+        # print('h_V', h_V.shape)
 
         # Position-wise feedforward
         dh = self.dense(h_V)
+        # print('dh', dh.shape)
         h_V = self.norm2(h_V + self.dropout2(dh))
+        # print('h_V', h_V.shape)
 
+        # mask again?
         if mask_V is not None:
             mask_V = mask_V.unsqueeze(-1)
             h_V = mask_V * h_V
@@ -1183,41 +1188,55 @@ class ProteinFeatures(nn.Module):
 class ProteinMPNN(nn.Module):
     def __init__(self, num_letters, node_features, edge_features,
                  hidden_dim, num_encoder_layers=3, num_decoder_layers=3,
-                 vocab=21, k_neighbors=64, augment_eps=0.05, dropout=0.1, ca_only=False):
+                 vocab=21, k_neighbors=64, augment_eps=0.05, dropout=0.1, 
+                 use_ipmp=False, n_points=8):
         super(ProteinMPNN, self).__init__()
 
         # Hyperparameters
         self.node_features = node_features
         self.edge_features = edge_features
         self.hidden_dim = hidden_dim
-
+        self.use_ipmp = use_ipmp
+        
         # Featurization layers
-        if ca_only:
-            self.features = CA_ProteinFeatures(node_features, edge_features, top_k=k_neighbors, augment_eps=augment_eps)
-            self.W_v = nn.Linear(node_features, hidden_dim, bias=True)
-        else:
-            self.features = ProteinFeatures(node_features, edge_features, top_k=k_neighbors, augment_eps=augment_eps)
+        # if ca_only:
+        #     self.features = CA_ProteinFeatures(node_features, edge_features, top_k=k_neighbors, augment_eps=augment_eps)
+        #     self.W_v = nn.Linear(node_features, hidden_dim, bias=True)
+        # else:
+        #     self.features = ProteinFeatures(node_features, edge_features, top_k=k_neighbors, augment_eps=augment_eps)
+
+        self.features = ProteinFeatures(node_features, edge_features, top_k=k_neighbors, augment_eps=augment_eps)
 
         self.W_e = nn.Linear(edge_features, hidden_dim, bias=True)
         self.W_s = nn.Embedding(vocab, hidden_dim)
 
-        # Encoder layers
-        self.encoder_layers = nn.ModuleList([
-            EncLayer(hidden_dim, hidden_dim * 2, dropout=dropout)
-            for _ in range(num_encoder_layers)
-        ])
+        if not use_ipmp:
+            self.encoder_layers = nn.ModuleList([
+                EncLayer(hidden_dim, hidden_dim*2, dropout=dropout)
+                for _ in range(num_encoder_layers)
+            ])
+        else:
+            self.encoder_layers = nn.ModuleList([
+                IPMPEncoder(hidden_dim, hidden_dim*2, dropout=dropout, n_points=n_points)
+                for _ in range(num_encoder_layers)
+            ])
 
         # Decoder layers
-        self.decoder_layers = nn.ModuleList([
-            DecLayer(hidden_dim, hidden_dim * 3, dropout=dropout)
-            for _ in range(num_decoder_layers)
-        ])
+        if not use_ipmp:
+            self.decoder_layers = nn.ModuleList([
+                DecLayer(hidden_dim, hidden_dim*3, dropout=dropout)
+                for _ in range(num_decoder_layers)
+            ])
+        else:
+            self.decoder_layers = nn.ModuleList([
+                IPMPDecoder(hidden_dim, hidden_dim*3, dropout=dropout, n_points=n_points)
+                for _ in range(num_decoder_layers)
+            ])
         self.W_out = nn.Linear(hidden_dim, num_letters, bias=True)
 
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
-
 
     def forward(self, X, S, mask, chain_M, residue_idx, chain_encoding_all, randn, use_input_decoding_order=False,
                 decoding_order=None):
@@ -1232,7 +1251,10 @@ class ProteinMPNN(nn.Module):
         mask_attend = gather_nodes(mask.unsqueeze(-1), E_idx).squeeze(-1)
         mask_attend = mask.unsqueeze(-1) * mask_attend
         for layer in self.encoder_layers:
-            h_V, h_E = layer(h_V, h_E, E_idx, mask, mask_attend)
+            if self.use_ipmp:
+                h_V, h_E = layer(h_V, h_E, E_idx, X, mask, mask_attend)
+            else:
+                h_V, h_E = layer(h_V, h_E, E_idx, mask, mask_attend)
 
         # Concatenate sequence embeddings for autoregressive decoder
         h_S = self.W_s(S)
@@ -1253,15 +1275,24 @@ class ProteinMPNN(nn.Module):
         mask_size = E_idx.shape[1]
         # one hot encode decoding order
         permutation_matrix_reverse = torch.nn.functional.one_hot(decoding_order, num_classes=mask_size).float()
-        # OMB here: 0 (invisible?) for current AA and any AAs decoded BEFORE it
         order_mask_backward = torch.einsum('ij, biq, bjp->bqp', (1 - torch.triu(torch.ones(mask_size, mask_size, device=device))), permutation_matrix_reverse, permutation_matrix_reverse)  # [1, L_max, L_max] array of visibility ordered backward
+        
         # set all residues to be visible
-        order_mask_backward = torch.ones_like(order_mask_backward)
+        # TODO henry add multi-batch handling here
+        # order_mask_backward = torch.ones_like(order_mask_backward).repeat(batch_size, 1, 1)
+        batch_size = X.shape[0]
+        order_mask_backward = torch.ones_like(order_mask_backward).repeat(batch_size, 1, 1)
 
         mask_attend = torch.gather(order_mask_backward, 2, E_idx).unsqueeze(-1)
         mask_1D = mask.view([mask.size(0), mask.size(1), 1, 1])
         mask_bw = mask_1D * mask_attend  # 1 if decoded already, 0 if not yet decoded
         mask_fw = mask_1D * (1. - mask_attend)  # inverse of bw mask
+
+        # Create neighbors of X
+        E_idx_flat = E_idx.view((*E_idx.shape[:-2], -1))
+        E_idx_flat = E_idx_flat[..., None, None].expand(-1, -1, *X.shape[-2:])
+        X_neighbors = torch.gather(X, -3, E_idx_flat)
+        X_neighbors = X_neighbors.view((*E_idx.shape, -1, 3))
 
         all_hidden = []
         h_EXV_encoder_fw = mask_fw * h_EXV_encoder  # [1, L_max, k_neighbors, embedding_dim (384)]
@@ -1269,9 +1300,14 @@ class ProteinMPNN(nn.Module):
             # Masked positions attend to encoder information, unmasked see. 
             h_ESV = cat_neighbors_nodes(h_V, h_ES, E_idx)
             h_ESV = mask_bw * h_ESV + h_EXV_encoder_fw
-            h_V = layer(h_V, h_ESV, mask)
+            if self.use_ipmp:
+                h_V = layer(h_V, h_ESV, E_idx, X_neighbors, mask)
+            else:
+                h_V = layer(h_V, h_ESV, mask)
+
             all_hidden.append(h_V)
 
+        # collect ONLY required hidden layers
         logits = self.W_out(h_V)
         log_probs = F.log_softmax(logits, dim=-1)
         return list(reversed(all_hidden)), h_S, log_probs
@@ -1393,7 +1429,7 @@ class ProteinMPNN(nn.Module):
         h_E = self.W_e(E)
         # Encoder is unmasked self-attention
         mask_attend = gather_nodes(mask.unsqueeze(-1), E_idx).squeeze(-1)
-        mask_attend = mask.unsqueeze(-1) * mask_attendE
+        mask_attend = mask.unsqueeze(-1) * mask_attend
         for layer in self.encoder_layers:
             h_V, h_E = layer(h_V, h_E, E_idx, mask, mask_attend)
 

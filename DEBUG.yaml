@@ -1,0 +1,24 @@
+# project: enzyme-stability
+# name: BATCHED_baseline
+
+datasets: [megascale]
+data:
+        mut_types: [single] #, reverse, permutations]
+
+training:
+  batched: true
+  num_workers: 32
+  learn_rate: 0.001
+  epochs: 100
+  lr_schedule: true
+  batch_size: 10000
+
+model:
+  hidden_dims: [64, 32]
+  subtract_mut: true
+  num_final_layers: 2
+  freeze_weights: true
+  load_pretrained: true
+  lightattn: true
+  final_layer: true
+

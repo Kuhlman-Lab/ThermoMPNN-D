@@ -11,13 +11,16 @@
 #SBATCH --qos=gpu_access
 
 source ~/.bashrc
-conda activate thermoMPNN
+# conda activate thermoMPNN
+conda activate proteinMPNN
 
 module load gcc
 module load cuda
 
-repo_location="~/ThermoMPNN/"
+# fill in your repo location for ThermoMPNN
+# repo_location="~/ThermoMPNN/"
+repo_location='/proj/kuhl_lab/users/dieckhau/ThermoMPNN'
 
-cd $repo_location
+cd "$repo_location/analysis"
 
-python analysis/custom_inference.py --pdb 2OCJ.pdb --chain A --model_path ../models/thermoMPNN_default.pt
+python custom_inference.py --pdb ../examples/pdbs/4ajy.pdb --chain B --model_path ../models/thermoMPNN_default.pt
