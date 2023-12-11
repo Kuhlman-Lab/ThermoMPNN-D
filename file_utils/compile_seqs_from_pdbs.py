@@ -15,8 +15,15 @@ def main(args):
     print('Parsing %s pdbs using %s format' % (len(pdb_list), args.fmt))
     for pdb in pdb_list:
         record = get_pdb_seq(os.path.join(args.pdbs, pdb), args.fmt)
-        seq_fname = pdb.strip('.pdb') + '.fasta'
-        write_seq(os.path.join(args.out, seq_fname), record, 'fasta')
+        if args.outfmt == 'fasta':
+            seq_fname = pdb.removesuffix('.pdb') + '.fasta'
+            write_seq(os.path.join(args.out, seq_fname), record, 'fasta')
+        elif args.outfmt == 'csv':
+            seq_fname = pdb.removesuffix('.pdb') + '.csv'
+            with open(os.path.join(args.out, seq_fname), 'w') as f:
+                f.write(',' + str(record.seq))
+        else:
+            raise ValueError("Invalid output format")
 
     return
 
@@ -27,5 +34,5 @@ if __name__ == '__main__':
     parser.add_argument('--pdbs', help='directory of pdbs to read', default='./')
     parser.add_argument('--out', help='output directory for FASTA files', default='./')
     parser.add_argument('--fmt', help='which format to retreive seq (pdb-atom or pdb-seqres)', default='pdb-atom')
-    
+    parser.add_argument('--outfmt', help='which format to save seq (fasta or csv)', default='fasta')
     main(parser.parse_args())

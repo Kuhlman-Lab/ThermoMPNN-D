@@ -1,9 +1,13 @@
 # project: enzyme-stability
 # name: BATCHED_baseline
 
-datasets: [megascale]
+version: v2 # options: (v1, v2, siamese)
+
+dataset: megascale # options: (megascale, fireprot (v1 only))
 data:
-        mut_types: [single] #, reverse, permutations]
+  mut_types: [single] # options: [single, reverse, permutations]
+  permissive_pdb: False  # enable permissive filename matching (useful for AF2 model checks)
+  alternate_pdb: False  # enable alternate PDB filenaming (used in structure studies)
 
 training:
   batched: true
