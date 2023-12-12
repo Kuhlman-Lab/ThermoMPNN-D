@@ -9,4 +9,4 @@ conda activate thermoMPNN
 # python train_thermompnn.py ../wout.yaml ../DEBUG.yaml
 
 # benchmark model
-python inference/inference_utils.py --config ../DEBUG.yaml --model ../m
+python inference/run_inference.py --config test.yaml --model checkpoints/DEBUG.ckpt --local ../wout.yaml

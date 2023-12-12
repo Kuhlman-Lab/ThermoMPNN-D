@@ -6,6 +6,55 @@ import numpy as np
 import pandas as pd
 
 from thermompnn.inference.inference_utils import get_metrics_full
+from thermompnn.datasets.siamese_datasets import SsymDatasetSiamese, ddgBenchDatasetSiamese, FireProtDatasetSiamese, MegaScaleDatasetSiamese
+
+
+def load_siamese_dataset(cfg):
+    """Parses input config and sets up proper dataset for INFERENCE only"""
+
+    ds_all = {
+        'megascale': MegaScaleDatasetSiamese,  
+        'fireprot': FireProtDatasetSiamese, 
+        'ddgbench': ddgBenchDatasetSiamese, 
+        'ssym': SsymDatasetSiamese
+    }
+    # dataset format: dataset-split
+    parts = cfg.dataset.split('-')
+    prefix = parts[0]
+    split = parts[-1] if len(parts) > 1 else 'dir'
+
+    if prefix == 'megascale' or prefix == 'fireprot':
+        ds = ds_all[prefix]
+        return ds(cfg, split)
+    else:
+        ds = ds_all['ddgbench']
+        flip = False
+
+        if prefix == 's669':
+            pdb_loc = os.path.join(cfg.misc_data, 'S669/pdbs')
+            csv_loc = os.path.join(cfg.misc_data, 'S669/s669_clean_dir.csv')
+
+        elif prefix == 'ssym':
+            pdb_loc = os.path.join(cfg.misc_data, 'protddg-bench-master/SSYM/pdbs')
+            if prefix == 'dir':
+                csv_loc = os.path.join(cfg.misc_data, 'protddg-bench-master/SSYM/ssym-5fold_clean_dir.csv')
+            else:
+                csv_loc = os.path.join(cfg.misc_data, 'protddg-bench-master/SSYM/ssym-5fold_clean_inv.csv')
+
+        elif prefix == 'p53':
+            if split != 'dir':  # handle inverse mutations (w/Rosetta structures)
+                flip = True
+            pdb_loc = os.path.join(cfg.misc_data, 'protddg-bench-master/P53/pdbs')
+            csv_loc = os.path.join(cfg.misc_data, 'protddg-bench-master/P53/p53_clean.csv')
+
+        elif prefix == 'myoglobin':
+            if split != 'dir':
+                flip = True
+            pdb_loc = os.path.join(cfg.misc_data, 'protddg-bench-master/MYOGLOBIN/pdbs')
+            csv_loc = os.path.join(cfg.misc_data, 'protddg-bench-master/MYOGLOBIN/myoglobin_clean.csv')
+
+        return ds(cfg, pdb_loc, csv_loc, flip=flip)
+
 
 def run_prediction_siamese(name, model, dataset_name, dataset, results, keep=False, use_both=True):
     """Standard inference for CSV/PDB based dataset in batched models"""

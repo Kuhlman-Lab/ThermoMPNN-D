@@ -140,9 +140,7 @@ extra_utils
 preprocessing/.ipynb_checkpoints
 configs/
 proteinmpnn/models
-
-# pymol smh
-*.cif
+*.csv
 
 jobs
 # local.yaml
