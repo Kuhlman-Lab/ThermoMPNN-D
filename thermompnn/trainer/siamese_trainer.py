@@ -5,7 +5,7 @@ from torchmetrics import Metric
 import pytorch_lightning as pl
 
 from thermompnn.model.siamese_model import TransferModelSiamese
-from thermompnn.model.trainer_utils import get_metrics
+from thermompnn.trainer.trainer_utils import get_metrics
 
 def custom_log_cosh_loss(D, y ,S):
     def _log_cosh(D, y, S):

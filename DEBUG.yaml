@@ -10,10 +10,9 @@ data:
   alternate_pdb: False  # enable alternate PDB filenaming (used in structure studies)
 
 training:
-  batched: true
-  num_workers: 32
+  num_workers: 16
   learn_rate: 0.001
-  epochs: 100
+  epochs: 1
   lr_schedule: true
   batch_size: 10000
 

@@ -34,7 +34,7 @@ def train(cfg):
         # initialize datasets
         train_dataset, val_dataset = get_v1_dataset(cfg)
         train_loader = DataLoader(train_dataset, collate_fn=lambda x: x, shuffle=True, num_workers=train_workers)
-        val_loader = DataLoader(val_dataset, collate_fn=lambda x: x, num_workers=val_workers)
+        val_loader = DataLoader(val_dataset, collate_fn=lambda x: x, num_workers=val_workers, shuffle=False)
 
         # load transfer learning model and trainer
         model_pl = TransferModelPL(cfg)
@@ -43,13 +43,13 @@ def train(cfg):
         train_dataset, val_dataset = get_v2_dataset(cfg)
         model_pl = TransferModelPLv2(cfg)
         train_loader = DataLoader(train_dataset, collate_fn=None, shuffle=True, num_workers=train_workers, batch_size=None)
-        val_loader = DataLoader(val_dataset, collate_fn=None, num_workers=val_workers, batch_size=None, shuffle=True)
+        val_loader = DataLoader(val_dataset, collate_fn=None, num_workers=val_workers, batch_size=None, shuffle=False)
         
     elif cfg.version.lower() == 'siamese':
         train_dataset, val_dataset = get_siamese_dataset(cfg)
         model_pl = TransferModelSiamesePL(cfg)
         train_loader = DataLoader(train_dataset, collate_fn=None, shuffle=True, num_workers=train_workers, batch_size=None)
-        val_loader = DataLoader(val_dataset, collate_fn=None, num_workers=val_workers, batch_size=None)
+        val_loader = DataLoader(val_dataset, collate_fn=None, num_workers=val_workers, batch_size=None, shuffle=False)
 
     else:
         raise ValueError('Invalid ThermoMPNN version! Must be v1, v2, or siamese')
@@ -73,12 +73,8 @@ def train(cfg):
 
 if __name__ == "__main__":
     # config.yaml and local.yaml files are combined to assemble all runtime arguments
-    if len(sys.argv) == 1:
-        yaml = "config.yaml"
-    else:
-        yaml = sys.argv[1]
-
-    cfg = OmegaConf.load(yaml)
-    cfg = OmegaConf.merge(cfg, OmegaConf.load("../local.yaml"))
-    cfg = OmegaConf.merge(cfg, OmegaConf.from_cli())
+    if len(sys.argv) != 3:
+        raise ValueError("Need to specify exactly two config files (config.yaml and local.yaml)")
+    
+    cfg = OmegaConf.merge(OmegaConf.load(sys.argv[1]), OmegaConf.load(sys.argv[2]))
     train(cfg)

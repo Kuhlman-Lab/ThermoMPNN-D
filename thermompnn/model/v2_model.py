@@ -70,7 +70,6 @@ class TransferModelv2(nn.Module):
         mpnn_embed = torch.gather(mpnn_embed, 1, mut_positions.unsqueeze(-1).expand(mut_positions.size(0), mut_positions.size(1), mpnn_embed.size(2)))
         mpnn_embed = torch.squeeze(mpnn_embed, 1) # final shape: (batch, embed_dim)
         
-        
         if self.lightattn:
             mpnn_embed = torch.unsqueeze(mpnn_embed, -1)  # shape for LA input: (batch, embed_dim, seq_length=1)
             mpnn_embed = self.light_attention(mpnn_embed, mask)  # shape for LA output: (batch, embed_dim)

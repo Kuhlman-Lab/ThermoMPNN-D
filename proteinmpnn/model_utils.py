@@ -16,8 +16,7 @@ import random
 import itertools
 
 import sys
-sys.path.append('/proj/kuhl_lab/users/dieckhau/ThermoMPNN/proteinmpnn')
-from rigid_utils import Rigid
+from proteinmpnn.rigid_utils import Rigid
 
 
 def featurize(batch, device, side_chains=-1):
