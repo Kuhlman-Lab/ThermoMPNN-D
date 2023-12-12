@@ -50,6 +50,9 @@ class TransferModelPLv2(pl.LightningModule):
         # one loss call for the whole batch
         mse = F.mse_loss(preds, mut_ddGs)
         
+        for metric in self.metrics[f"{prefix}_metrics"]["ddG"].values():
+            metric.update(preds, mut_ddGs)
+
         for name, metric in self.metrics[f"{prefix}_metrics"]["ddG"].items():
             try:
                 metric.compute()
