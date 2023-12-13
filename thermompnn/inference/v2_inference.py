@@ -1,4 +1,5 @@
 import torch
+from torch.utils.data import DataLoader
 
 import os
 from tqdm import tqdm
@@ -23,7 +24,10 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
     
     print('Testing Model %s on dataset %s' % (name, dataset_name))
     preds, ddgs = [], []
-    for i, batch in enumerate(tqdm(dataset)):
+    
+    loader = DataLoader(dataset, collate_fn=lambda x: x, shuffle=False, num_workers=7, batch_size=None)
+    
+    for i, batch in enumerate(tqdm(loader)):
         X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs = batch
         X = X.to(device)
         S = S.to(device)
@@ -79,7 +83,7 @@ def load_v2_dataset(cfg):
     # dataset format: dataset-split
     parts = cfg.dataset.split('-')
     prefix = parts[0]
-    split = parts[-1] if len(parts) > 1 else 'dir'
+    split = '-'.join(parts[1:]) if len(parts) > 1 else 'dir'
 
     if prefix == 'megascale' or prefix == 'fireprot':
         ds = ds_all[prefix]
@@ -89,26 +93,26 @@ def load_v2_dataset(cfg):
         flip = False
 
         if prefix == 's669':
-            pdb_loc = os.path.join(cfg.misc_data, 'S669/pdbs')
-            csv_loc = os.path.join(cfg.misc_data, 'S669/s669_clean_dir.csv')
+            pdb_loc = os.path.join(cfg.data_loc.misc_data, 'S669/pdbs')
+            csv_loc = os.path.join(cfg.data_loc.misc_data, 'S669/s669_clean_dir.csv')
 
         elif prefix == 'ssym':
-            pdb_loc = os.path.join(cfg.misc_data, 'protddg-bench-master/SSYM/pdbs')
-            if prefix == 'dir':
-                csv_loc = os.path.join(cfg.misc_data, 'protddg-bench-master/SSYM/ssym-5fold_clean_dir.csv')
+            pdb_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/SSYM/pdbs')
+            if split == 'dir':
+                csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/SSYM/ssym-5fold_clean_dir.csv')
             else:
-                csv_loc = os.path.join(cfg.misc_data, 'protddg-bench-master/SSYM/ssym-5fold_clean_inv.csv')
+                csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/SSYM/ssym-5fold_clean_inv.csv')
 
         elif prefix == 'p53':
             if split != 'dir':  # handle inverse mutations (w/Rosetta structures)
                 flip = True
-            pdb_loc = os.path.join(cfg.misc_data, 'protddg-bench-master/P53/pdbs')
-            csv_loc = os.path.join(cfg.misc_data, 'protddg-bench-master/P53/p53_clean.csv')
+            pdb_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/P53/pdbs')
+            csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/P53/p53_clean.csv')
 
         elif prefix == 'myoglobin':
             if split != 'dir':
                 flip = True
-            pdb_loc = os.path.join(cfg.misc_data, 'protddg-bench-master/MYOGLOBIN/pdbs')
-            csv_loc = os.path.join(cfg.misc_data, 'protddg-bench-master/MYOGLOBIN/myoglobin_clean.csv')
+            pdb_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/MYOGLOBIN/pdbs')
+            csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/MYOGLOBIN/myoglobin_clean.csv')
 
         return ds(cfg, pdb_loc, csv_loc, flip=flip)

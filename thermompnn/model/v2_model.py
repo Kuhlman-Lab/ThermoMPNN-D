@@ -3,11 +3,6 @@ import torch.nn as nn
 
 from thermompnn.model.modules import get_protein_mpnn, LightAttention, MultHeadAttn
 
-HIDDEN_DIM = 128
-EMBED_DIM = 128
-VOCAB_DIM = 21
-ALPHABET = 'ACDEFGHIKLMNPQRSTVWYX'
-
 
 class TransferModelv2(nn.Module):
     """Rewritten TransferModel class using Batched datasets for faster training"""

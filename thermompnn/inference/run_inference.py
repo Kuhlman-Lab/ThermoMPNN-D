@@ -23,7 +23,7 @@ def inference(cfg, args):
     # pre-initialization params
     device = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
     ds_name = cfg.dataset
-    model_name = cfg.name 
+    model_name = args.model.split('.')[0]
     
     if cfg.version == 'v1':
         # load specified dataset

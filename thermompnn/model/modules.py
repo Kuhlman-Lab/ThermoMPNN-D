@@ -67,7 +67,7 @@ class LightAttention(nn.Module):
         o = self.feature_convolution(x)  # [batch_size, embeddings_dim, sequence_length]
         o = self.dropout(o)  # [batch_gsize, embeddings_dim, sequence_length]
         attention = self.attention_convolution(x)  # [batch_size, embeddings_dim, sequence_length]
-        o1 = o * self.softmax(attention)  # [batch_size, embeddings_dim]
+        o1 = o * self.softmax(attention)  # [batch_size, embeddings_dim, sequence_length]
         return torch.squeeze(o1, -1)
 
 

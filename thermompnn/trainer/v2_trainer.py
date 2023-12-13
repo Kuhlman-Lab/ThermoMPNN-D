@@ -20,17 +20,6 @@ class TransferModelPLv2(pl.LightningModule):
 
         self.dev = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
 
-        # set up metrics dictionary
-        # self.metrics = {}
-        # for split in ("train_metrics", "val_metrics"):
-        #     self.metrics[split] = {}
-        #     out = "ddG"
-        #     self.metrics[split][out] = {}
-        #     self.metrics[split]['results'] = {}
-        #     for name, metric in get_metrics_new_functional().items():
-        #         self.metrics[split][out][name] = metric
-        #         self.metrics[split]['results'][name] = []
-
         self.metrics = nn.ModuleDict()
         for split in ("train_metrics", "val_metrics"):
             self.metrics[split] = nn.ModuleDict()
@@ -60,37 +49,10 @@ class TransferModelPLv2(pl.LightningModule):
                 continue
             self.log(f"{prefix}_ddG_{name}", metric, prog_bar=True, on_step=False, on_epoch=True,
                         batch_size=len(batch))
-
-        # record training/validation metrics on a per-batch level (running avg)
-        # for name, metric in self.metrics[f"{prefix}_metrics"]["ddG"].items():
-        #     if name == 'rmse':
-        #         current_metric = metric(torch.squeeze(preds), torch.squeeze(mut_ddGs), squared=False)
-        #     else:
-        #         current_metric = metric(torch.squeeze(preds), torch.squeeze(mut_ddGs))
-                
-        #     self.metrics[f"{prefix}_metrics"]["results"][name].append(current_metric)
-        #     running_avg = torch.mean(torch.tensor(self.metrics[f"{prefix}_metrics"]["results"][name]))
-            # self.log(f"{prefix}_{output}_{name}", running_avg, prog_bar=True, on_step=True, on_epoch=True)
             
         if mse == 0.0:
             return None
         return mse
-    
-    # def on_train_epoch_end(self):
-    #     # log metrics on a per-epoch level
-    #     return self.log_epoch_metrics('train')
-    
-    # def on_validation_epoch_end(self):
-    #     # this, weirdly, logs the validation metrics from the PREVIOUS epoch
-    #     return self.log_epoch_metrics('val')
-    
-    # def log_epoch_metrics(self, prefix):
-    #     output = 'ddG'
-    #     for name, metric in self.metrics[f"{prefix}_metrics"][output].items():
-    #         mean_metric = torch.mean(torch.tensor(self.metrics[f"{prefix}_metrics"]["results"][name]))
-    #         self.log(f"{prefix}_{output}_{name}_mean", mean_metric, prog_bar=True, on_step=False, on_epoch=True)
-    #         self.metrics[f"{prefix}_metrics"]["results"][name].clear()
-    #     return
 
     def training_step(self, batch, batch_idx):
         return self.shared_eval(batch, batch_idx, 'train')

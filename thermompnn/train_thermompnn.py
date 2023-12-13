@@ -57,8 +57,6 @@ def train(cfg):
     # additional params, logging, checkpoints for training
     max_ep = cfg.training.epochs if 'epochs' in cfg.training else 100
     batch_fraction = cfg.training.batch_fraction if 'batch_fraction' in cfg.training else 1.0
-    if batch_fraction != 1.0:
-        print('Fraction of training batches used per epoch:   ', batch_fraction)
 
     filename = cfg.name + '_{epoch:02d}_{val_ddG_spearman:.02}'
     monitor = 'val_ddG_spearman'
