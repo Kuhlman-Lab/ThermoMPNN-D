@@ -40,7 +40,7 @@ class TransferModelPLv2(pl.LightningModule):
         mse = F.mse_loss(preds, mut_ddGs)
         
         for metric in self.metrics[f"{prefix}_metrics"]["ddG"].values():
-            metric.update(preds, mut_ddGs)
+            metric.update(torch.squeeze(preds), torch.squeeze(mut_ddGs))
 
         for name, metric in self.metrics[f"{prefix}_metrics"]["ddG"].items():
             try:

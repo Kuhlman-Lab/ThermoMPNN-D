@@ -3,15 +3,23 @@ name: test
 
 version: v2 # options: (v1, v2, siamese)
 
-dataset: megascale-test
+# dataset: megascale-test
+# dataset: fireprot-homologue-free
+# dataset: ssym-dir
+# dataset: ssym-inv
+# dataset: s669
+# dataset: p53
+dataset: myoglobin
+
+
 data:
   mut_types: [single] # options: [single, reverse, permutations]
   permissive_pdb: False  # enable permissive filename matching (useful for AF2 model checks)
   alternate_pdb: False  # enable alternate PDB filenaming (used in structure studies)
 
 training:
-  num_workers: 16
-  learn_rate: 0.001
+  num_workers: 8
+  learn_rate: 0.0001
   epochs: 1
   lr_schedule: true
   batch_size: 10000
@@ -24,4 +32,3 @@ model:
   load_pretrained: true
   lightattn: true
   final_layer: true
-

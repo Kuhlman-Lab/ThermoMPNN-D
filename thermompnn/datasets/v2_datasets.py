@@ -331,6 +331,8 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
         # new type-specific data loading - add option for multi-mutations
         df = df.loc[~df.mut_type.str.contains("ins") & ~df.mut_type.str.contains("del"), :].reset_index(drop=True)
         mut_list = []
+        # mut_list = [df.loc[df.mut_type.str.contains("wt"), :].reset_index(drop=True)] # by default, keep wt for reference
+
         if 'single' in self.cfg.data.mut_types:
             mut_list.append(df.loc[~df.mut_type.str.contains(":") & ~df.mut_type.str.contains("wt"), :].reset_index(drop=True))
         if 'double' in self.cfg.data.mut_types:
@@ -533,7 +535,7 @@ class ddgBenchDatasetv2(torch.utils.data.Dataset):
         self.cfg = cfg
         self.pdb_dir = pdb_dir
         self.rev = flip  # "reverse" mutation testing
-
+        print('Reverse mutations: %s' % str(self.rev))
         df = pd.read_csv(csv_fname)
         self.df = df
 
@@ -555,7 +557,7 @@ class ddgBenchDatasetv2(torch.utils.data.Dataset):
         return len(self.pdb_data)
 
     def __getitem__(self, index):
-        """Batch retrieval fxn - do each row as its own batch, for simplicity"""
+        """Batch retrieval fxn - do each row as its own item, for simplicity"""
 
         pdb_list = []
         row = self.df.iloc[index]
@@ -565,9 +567,9 @@ class ddgBenchDatasetv2(torch.utils.data.Dataset):
         wtAA, mutAA = mut_info[0], mut_info[-1]
         pdb_idx = self._get_pdb_idx(mut_info, pdb_CANONICAL)
         ddG = float(row.DDG) * -1
-        
-        if not self.rev:  
-            pdb = deepcopy(pdb_CANONICAL)  
+
+        if not self.rev:
+            pdb = deepcopy(pdb_CANONICAL)  # if you don't do this, it will overwrite each PDB entry if modified
             assert pdb['seq'][pdb_idx] == wtAA
             pdb['mutation'] = Mutation([pdb_idx], [wtAA], [mutAA], ddG, row.PDB[:-1])
             
@@ -587,14 +589,11 @@ class ddgBenchDatasetv2(torch.utils.data.Dataset):
             tmp = [p for p in pdb[sk]]
             tmp[pdb_idx] = wtAA
             pdb[sk] = ''.join(tmp)   
-    
-        # print(pdb)     
-            
+
         tmp = deepcopy(pdb)  # this is hacky but it is needed or else it overwrites all PDBs with the last data point
-        pdb_list.append(tmp)        
+        pdb_list.append(tmp)
         features = tied_featurize_mut(pdb_list, 'cpu')
         return features
-        # return pdb_list
     
     def _get_pdb_idx(self, mut_info, pdb):
         """Helper function to fix any alignment issues with messy experimental data"""

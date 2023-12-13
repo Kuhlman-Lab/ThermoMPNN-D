@@ -22,6 +22,9 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
     for m in metrics['ddG'].values():
         m = m.to(device)
     
+    model = model.eval()
+    model = model.cuda()
+    
     print('Testing Model %s on dataset %s' % (name, dataset_name))
     preds, ddgs = [], []
     

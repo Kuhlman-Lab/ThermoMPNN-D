@@ -141,6 +141,7 @@ preprocessing/.ipynb_checkpoints
 configs/
 proteinmpnn/models
 *.csv
+inbox/
 
 jobs
 # local.yaml
