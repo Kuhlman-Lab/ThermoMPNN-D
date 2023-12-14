@@ -12,7 +12,7 @@ class TransferModelv2(nn.Module):
         self.cfg = cfg
         self.hidden_dims = list(cfg.model.hidden_dims)
         self.subtract_mut = cfg.model.subtract_mut
-        self.final_layer = cfg.model.final_layer if 'final_layer' in cfg.model else False
+        self.final_layer = cfg.model.final_layer if 'final_layer' in cfg.model else None
         if self.subtract_mut:
             print('Enabled wt mutation subtraction!')
             
@@ -45,11 +45,6 @@ class TransferModelv2(nn.Module):
         for sz1, sz2 in zip(hid_sizes, hid_sizes[1:]):
             self.ddg_out.append(nn.ReLU())
             self.ddg_out.append(nn.Linear(sz1, sz2))
-        
-        # TODO extra transform in final layer - keep or drop?
-        if self.final_layer:
-            print('Enabled final linear layer!')
-            self.end_out = nn.Linear(1, 1)
 
     def forward(self, X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs):
         """Vectorized fwd function for arbitrary batches of mutations"""
@@ -71,12 +66,6 @@ class TransferModelv2(nn.Module):
 
         ddg = self.ddg_out(mpnn_embed)  # shape: (batch, 21)
         
-        if self.final_layer:
-            dims = ddg.shape
-            ddg = torch.reshape(ddg, (dims[0] * dims[1], 1))  # reshape to (batch * 21, 1) for linear layer
-            ddg = self.end_out(ddg)  # run through 1x1 linear layer
-            ddg = torch.reshape(ddg, dims)  # reshape back to (batch, 21)
-        
         # index ddg outputs based on mutant AA indices
         if self.cfg.model.subtract_mut:
             ddg = torch.gather(ddg, 1, mut_mutant_AAs) - torch.gather(ddg, 1, mut_wildtype_AAs)
@@ -84,4 +73,3 @@ class TransferModelv2(nn.Module):
            ddg = torch.gather(ddg, 1, mut_mutant_AAs)
            
         return ddg
-

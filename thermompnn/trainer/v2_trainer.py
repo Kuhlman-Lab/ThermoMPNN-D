@@ -76,11 +76,7 @@ class TransferModelPLv2(pl.LightningModule):
         mlp_params = [
             {"params": self.model.ddg_out.parameters()}
             ]
-
-        if self.cfg.model.final_layer:
-            print('Configuring final layer!')
-            mlp_params.append({"params": self.model.end_out.parameters()})
-
+        
         param_list = param_list + mlp_params
         opt = torch.optim.AdamW(param_list, lr=self.learn_rate)
 
