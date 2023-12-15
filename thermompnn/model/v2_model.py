@@ -12,7 +12,6 @@ class TransferModelv2(nn.Module):
         self.cfg = cfg
         self.hidden_dims = list(cfg.model.hidden_dims)
         self.subtract_mut = cfg.model.subtract_mut
-        self.final_layer = cfg.model.final_layer if 'final_layer' in cfg.model else None
         if self.subtract_mut:
             print('Enabled wt mutation subtraction!')
             
@@ -37,9 +36,8 @@ class TransferModelv2(nn.Module):
         self.lightattn = cfg.model.lightattn if 'lightattn' in cfg.model else False
         
         if self.lightattn:
-            print('Enabled LightAttention')
-            self.light_attention = LightAttention(embeddings_dim=(HIDDEN_DIM*self.num_final_layers + EMBED_DIM))
-
+            self.light_attention = LightAttention(embeddings_dim=(HIDDEN_DIM*self.num_final_layers + EMBED_DIM), kernel_size=1)
+        
         self.ddg_out = nn.Sequential()
 
         for sz1, sz2 in zip(hid_sizes, hid_sizes[1:]):

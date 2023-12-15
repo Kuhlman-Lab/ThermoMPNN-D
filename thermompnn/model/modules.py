@@ -46,18 +46,17 @@ class LightAttention(nn.Module):
     Hannes Stark et al. 2022
     https://github.com/HannesStark/protein-localization/blob/master/models/light_attention.py
     """
-    def __init__(self, embeddings_dim=1024, output_dim=11, dropout=0.25, kernel_size=9, conv_dropout: float = 0.25):
+    def __init__(self, embeddings_dim=1024, output_dim=11, dropout=0.25, kernel_size=9, conv_dropout=0.25, linear=False):
         super(LightAttention, self).__init__()
 
         self.feature_convolution = nn.Conv1d(embeddings_dim, embeddings_dim, kernel_size, stride=1,
-                                             padding=kernel_size // 2)
+                                            padding=kernel_size // 2)
         self.attention_convolution = nn.Conv1d(embeddings_dim, embeddings_dim, kernel_size, stride=1,
-                                               padding=kernel_size // 2)
-
+                                            padding=kernel_size // 2)
         self.softmax = nn.Softmax(dim=-1)
         self.dropout = nn.Dropout(conv_dropout)
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor, **kwargs) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         """
         Args:
             x: [batch_size, embeddings_dim, sequence_length] embedding tensor
@@ -65,7 +64,7 @@ class LightAttention(nn.Module):
             LightAttention reweighted vector of the same dimensions
         """
         o = self.feature_convolution(x)  # [batch_size, embeddings_dim, sequence_length]
-        o = self.dropout(o)  # [batch_gsize, embeddings_dim, sequence_length]
+        o = self.dropout(o)  # [batch_size, embeddings_dim, sequence_length]
         attention = self.attention_convolution(x)  # [batch_size, embeddings_dim, sequence_length]
         o1 = o * self.softmax(attention)  # [batch_size, embeddings_dim, sequence_length]
         return torch.squeeze(o1, -1)

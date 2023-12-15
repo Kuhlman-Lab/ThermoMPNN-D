@@ -58,7 +58,7 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
     preds, ddgs = np.squeeze(preds), np.squeeze(ddgs)
     tmp = pd.DataFrame({'ddG_pred': preds, 'ddG_true': ddgs})
     print(tmp.head)
-    tmp.to_csv('ThermoMPNN_raw_preds_batched.csv')
+    # tmp.to_csv('ThermoMPNN_raw_preds_batched.csv')
 
     column = {
         "Model": name,
