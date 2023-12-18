@@ -142,6 +142,8 @@ configs/
 proteinmpnn/models
 *.csv
 inbox/
+test.yaml
+test.sh
 
 jobs
 # local.yaml

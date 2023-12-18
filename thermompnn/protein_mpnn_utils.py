@@ -1238,8 +1238,7 @@ class ProteinMPNN(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-    def forward(self, X, S, mask, chain_M, residue_idx, chain_encoding_all, randn, use_input_decoding_order=False,
-                decoding_order=None):
+    def forward(self, X, S, mask, chain_M, residue_idx, chain_encoding_all, randn=None):
         """ Graph-conditioned sequence model """
         device = X.device
         # Prepare node and edge embeddings
@@ -1266,24 +1265,28 @@ class ProteinMPNN(nn.Module):
 
         chain_M = chain_M * mask  # update chain_M to include missing regions
 
-        if not use_input_decoding_order:
-            # default ProteinMPNN random autoregressive decoding
-            # decoding_order = torch.argsort((chain_M+0.0001)*(torch.abs(randn))) #[numbers will be smaller for places where chain_M = 0.0 and higher for places where chain_M = 1.0]
-            # decode left-to-right with all residues visible - we know the surrounding sequence
-            decoding_order = torch.tensor([list(range(X.size(1)))], device=device)
+        # default ProteinMPNN random autoregressive decoding
+        if randn is not None:
+            randn = torch.randn(chain_M.shape, device=X.device)
+            decoding_order = torch.argsort((chain_M+0.0001)*(torch.abs(randn))) #[numbers will be smaller for places where chain_M = 0.0 and higher for places where chain_M = 1.0]
+        
+        # left-to-right decoding order
+        else:
+            decoding_order = torch.arange(0, X.size(1), device=device).unsqueeze(0).repeat(X.size(0), 1)
 
         mask_size = E_idx.shape[1]
         # one hot encode decoding order
         permutation_matrix_reverse = torch.nn.functional.one_hot(decoding_order, num_classes=mask_size).float()
         order_mask_backward = torch.einsum('ij, biq, bjp->bqp', (1 - torch.triu(torch.ones(mask_size, mask_size, device=device))), permutation_matrix_reverse, permutation_matrix_reverse)  # [1, L_max, L_max] array of visibility ordered backward
-        
-        # set all residues to be visible
-        # TODO henry add multi-batch handling here
-        # order_mask_backward = torch.ones_like(order_mask_backward).repeat(batch_size, 1, 1)
-        batch_size = X.shape[0]
-        order_mask_backward = torch.ones_like(order_mask_backward).repeat(batch_size, 1, 1)
 
+        # set all residues to be visible
+        order_mask_backward = torch.ones_like(order_mask_backward)
+
+        # apply padding/visible residue mask
+        chain_applied = chain_M.unsqueeze(-1).repeat(1, 1, order_mask_backward.shape[2])
+        order_mask_backward = order_mask_backward * chain_applied
         mask_attend = torch.gather(order_mask_backward, 2, E_idx).unsqueeze(-1)
+
         mask_1D = mask.view([mask.size(0), mask.size(1), 1, 1])
         mask_bw = mask_1D * mask_attend  # 1 if decoded already, 0 if not yet decoded
         mask_fw = mask_1D * (1. - mask_attend)  # inverse of bw mask

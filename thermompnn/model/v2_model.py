@@ -48,7 +48,7 @@ class TransferModelv2(nn.Module):
         """Vectorized fwd function for arbitrary batches of mutations"""
 
         # getting ProteinMPNN structure embeddings
-        all_mpnn_hid, mpnn_embed, _ = self.prot_mpnn(X, S, mask, chain_M, residue_idx, chain_encoding_all, None)
+        all_mpnn_hid, mpnn_embed, _ = self.prot_mpnn(X, S, mask, chain_M, residue_idx, chain_encoding_all)
         if self.num_final_layers > 0:
             all_mpnn_hid = torch.cat(all_mpnn_hid[:self.num_final_layers], -1)
             mpnn_embed = torch.cat([all_mpnn_hid, mpnn_embed], -1)

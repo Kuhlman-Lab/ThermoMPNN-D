@@ -31,12 +31,18 @@ def get_v1_dataset(cfg):
 
 
 def get_v2_dataset(cfg):
-    # valid_ds = ['megascale', 'megascale_pt']
+    # valid_ds = ['megascale', 'megascale_pt', 'megascale-de0']
     query = cfg.dataset.lower()
     assert query.startswith('megascale')
     if query.endswith('pt'): # contains mutant structures
         return MegaScaleDatasetv2Pt(cfg, 'train'), MegaScaleDatasetv2Pt(cfg, 'val')
     else: # un-augmented or lazy data augmentation
+        if query.startswith('megascale-de'): # special case here - deep ensemble training
+            train, val = f'de_train_{query[-1]}', f'de_val_{query[-1]}'
+            # grab megascale dataset object
+            ds = MegaScaleDatasetv2
+            return ds(cfg, train), ds(cfg, val)
+
         return MegaScaleDatasetv2(cfg, 'train'), MegaScaleDatasetv2(cfg, 'val')
 
 
