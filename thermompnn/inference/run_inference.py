@@ -1,13 +1,9 @@
 import torch
-from torch import nn
-from torchmetrics import R2Score, MeanSquaredError, SpearmanCorrCoef, PearsonCorrCoef
-
 import argparse
 from omegaconf import OmegaConf
 import pandas as pd
+import os
 
-from thermompnn.model.modules import get_protein_mpnn
-from thermompnn.protein_mpnn_utils import tied_featurize
 from thermompnn.inference.v1_inference import load_v1_dataset, run_prediction_default, run_prediction_keep_preds
 from thermompnn.inference.v2_inference import load_v2_dataset, run_prediction_batched
 from thermompnn.inference.siamese_inference import load_siamese_dataset, run_prediction_siamese
@@ -42,7 +38,7 @@ def inference(cfg, args):
         ds = load_v2_dataset(cfg)
         print('Loading model %s' % args.model)
         model = TransferModelPLv2.load_from_checkpoint(args.model, cfg=cfg, map_location=device).model
-        results = run_prediction_batched(model_name, model, ds_name, ds, [], False)
+        results = run_prediction_batched(model_name, model, ds_name, ds, [], args.keep_preds)
 
     elif cfg.version == 'siamese':
         ds = load_siamese_dataset(cfg)
@@ -54,7 +50,7 @@ def inference(cfg, args):
 
     df = pd.DataFrame(results)
     print(df)
-    df.to_csv(f"ThermoMPNN_{cfg.version}_{ds_name}_metrics.csv")
+    df.to_csv(f"ThermoMPNN_{os.path.basename(model_name).removesuffix('.ckpt')}_{ds_name}_metrics.csv")
 
     return
 

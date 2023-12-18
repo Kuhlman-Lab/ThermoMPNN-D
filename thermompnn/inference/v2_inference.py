@@ -55,10 +55,11 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
         preds += list(torch.squeeze(pred, dim=-1).detach().cpu())
         ddgs += list(torch.squeeze(mut_ddGs, dim=-1).detach().cpu())
 
-    preds, ddgs = np.squeeze(preds), np.squeeze(ddgs)
-    tmp = pd.DataFrame({'ddG_pred': preds, 'ddG_true': ddgs})
-    print(tmp.head)
-    # tmp.to_csv('ThermoMPNN_raw_preds_batched.csv')
+    if keep:
+        preds, ddgs = np.squeeze(preds), np.squeeze(ddgs)
+        tmp = pd.DataFrame({'ddG_pred': preds, 'ddG_true': ddgs})
+        print(tmp.head)
+        tmp.to_csv(f'ThermoMPNN_{os.path.basename(name).removesuffix(".ckpt")}_{dataset_name}_preds.csv')
 
     column = {
         "Model": name,

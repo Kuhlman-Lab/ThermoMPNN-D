@@ -60,7 +60,7 @@ class TransferModelv2(nn.Module):
         
         if self.lightattn:
             mpnn_embed = torch.unsqueeze(mpnn_embed, -1)  # shape for LA input: (batch, embed_dim, seq_length=1)
-            mpnn_embed = self.light_attention(mpnn_embed, mask)  # shape for LA output: (batch, embed_dim)
+            mpnn_embed = self.light_attention(mpnn_embed)  # shape for LA output: (batch, embed_dim)
 
         ddg = self.ddg_out(mpnn_embed)  # shape: (batch, 21)
         
