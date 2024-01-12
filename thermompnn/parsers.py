@@ -1,6 +1,6 @@
 
 from thermompnn.datasets.v1_datasets import MegaScaleDataset, FireProtDataset, ComboDataset
-from thermompnn.datasets.v2_datasets import MegaScaleDatasetv2, MegaScaleDatasetv2Pt
+from thermompnn.datasets.v2_datasets import MegaScaleDatasetv2, MegaScaleDatasetv2Pt, MegaScaleDatasetv2Aug, MegaScaleDatasetv2Rebatched
 from thermompnn.datasets.siamese_datasets import MegaScaleDatasetSiamese, MegaScaleDatasetSiamesePt
 
 
@@ -36,6 +36,9 @@ def get_v2_dataset(cfg):
     assert query.startswith('megascale')
     if query.endswith('pt'): # contains mutant structures
         return MegaScaleDatasetv2Pt(cfg, 'train'), MegaScaleDatasetv2Pt(cfg, 'val')
+    elif query.endswith('rebatched'): # contains mutant structures
+        print('loading rebatched dataset with ptmul-filtered training dataset')
+        return MegaScaleDatasetv2Rebatched(cfg, 'train_ptmul'), MegaScaleDatasetv2Rebatched(cfg, 'val')
     else: # un-augmented or lazy data augmentation
         if query.startswith('megascale-de'): # special case here - deep ensemble training
             train, val = f'de_train_{query[-1]}', f'de_val_{query[-1]}'

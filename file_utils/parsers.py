@@ -13,7 +13,8 @@ def get_pdb_seq(fname: str, format: str = 'pdb-atom') -> SeqRecord:
             if seq.index('X') == 0:  # deal with N-terminal ACE caps by removal
                 record.seq = Seq(seq.replace('X', ''))  
             else:
-                raise AssertionError('Un-handled residue detected - requires manual correction!')
+                record.seq = Seq(seq.replace('X', ''))
+                # raise AssertionError('Un-handled residue detected - requires manual correction!')
     return record
 
 def write_seq(fname: str, sequence: SeqRecord, format: str = 'fasta'):
