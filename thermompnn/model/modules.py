@@ -135,57 +135,34 @@ class MultHeadAttn(nn.Module):
 class MPNNLayer(nn.Module):
     def __init__(self, num_hidden, num_in, dropout=0.1, scale=30):
         super(MPNNLayer, self).__init__()
-        self.num_hidden = num_hidden
+
         self.num_in = num_in
-        self.scale = scale
+        print('Agg drop:', dropout)
         self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
-        self.norm1 = nn.LayerNorm(num_hidden)
-        self.norm2 = nn.LayerNorm(num_hidden)
-
-        self.W1 = nn.Linear(num_hidden + num_in, num_hidden, bias=True)
-        self.W2 = nn.Linear(num_hidden, num_hidden, bias=True)
-        self.W3 = nn.Linear(num_hidden, num_hidden, bias=True)
+        self.norm1 = nn.LayerNorm(num_in // 2)
+        self.W1 = nn.Linear(num_in, num_hidden, bias=True)
         self.act = torch.nn.GELU()
-        self.dense = PositionWiseFeedForward(num_hidden, num_hidden * 4)
 
-    def forward_new(self, emb1, emb2):
-        """ Message passing b/w two embeddings"""
-        # concatenate emb1 + emb2 and emb2 + emb1
+    def forward(self, emb1, emb2, mask=None):
+        """ Message passing b/w two embeddings
+        emb1 and emb2: embeddings with the same shape [BATCH, EMBED]
+        mask: mask of whether to use a message or not (if single mutation, don't use message) [BATCH, EMBED]
+        """
+        # concatenate emb1 to emb2
+        emb_both = torch.cat([emb1, emb2], dim=-1)
 
-        # pass both through shared MLP to construct message
+        # pass through linear layer or MLP to construct message using BOTH emb1 and emb2
+        message = self.act(self.W1(emb_both))
+        if mask is not None:
+            message = message * mask
+            # print(mask.sum() / mask.nelement())
 
-        # aggregate message with original emb1 or emb2 to get new rep
+        # aggregate message with original emb1 to get new emb1
+        emb1 = self.norm1(emb1 + self.dropout1(message))
 
-        # aggregate emb1 with emb2 to get final rep
+        return emb1
 
-        # Concatenate h_V_i to h_E_ij
-        # h_V_expand = h_V.unsqueeze(-2).expand(-1, -1, h_E.size(-2), -1)
-        # h_EV = torch.cat([h_V_expand, h_E], -1)
-
-        # # use MLP to construct message
-        # h_message = self.W3(self.act(self.W2(self.act(self.W1(h_EV)))))
-
-        # # optional: attend to message
-        # if mask_attend is not None:
-        #     h_message = mask_attend.unsqueeze(-1) * h_message
-
-        # # aggregate message?
-        # dh = torch.sum(h_message, -2) / self.scale
-
-        # h_V = self.norm1(h_V + self.dropout1(dh))
-
-        # # Position-wise feedforward
-        # dh = self.dense(h_V)
-        # h_V = self.norm2(h_V + self.dropout2(dh))
-
-        # # mask again?
-        # if mask_V is not None:
-        #     mask_V = mask_V.unsqueeze(-1)
-        #     h_V = mask_V * h_V
-        # return h_V
-
-    def forward(self, h_V, h_E, mask_V=None, mask_attend=None):
+    def forwardOLD(self, h_V, h_E, mask_V=None, mask_attend=None):
         """ Parallel computation of full transformer layer """
 
         # Concatenate h_V_i to h_E_ij

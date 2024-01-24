@@ -42,8 +42,17 @@ def train(cfg):
     elif cfg.version.lower() == 'v2':
         train_dataset, val_dataset = get_v2_dataset(cfg)
         model_pl = TransferModelPLv2(cfg)
-        train_loader = DataLoader(train_dataset, collate_fn=None, shuffle=True, num_workers=train_workers, batch_size=None)
-        val_loader = DataLoader(val_dataset, collate_fn=None, num_workers=val_workers, batch_size=None, shuffle=False)
+        if 'rebatched' in cfg.dataset:  # use proper batching and collating procedures for performance
+            from thermompnn.datasets.v2_datasets import tied_featurize_mut
+            # TODO allow training data shuffling as a customizable training param
+            print('Running rebatched ThermoMPNN formulation with datasets sized %s and %s' % (str(len(train_dataset)), str(len(val_dataset))))
+            train_loader = DataLoader(train_dataset, collate_fn=tied_featurize_mut, shuffle=True, num_workers=train_workers, 
+                                      batch_size=cfg.training.batch_size)
+            val_loader = DataLoader(val_dataset, collate_fn=tied_featurize_mut, num_workers=val_workers, 
+                                    batch_size=cfg.training.batch_size, shuffle=False)
+        else:
+            train_loader = DataLoader(train_dataset, collate_fn=None, shuffle=True, num_workers=train_workers, batch_size=None)
+            val_loader = DataLoader(val_dataset, collate_fn=None, num_workers=val_workers, batch_size=None, shuffle=False)
         
     elif cfg.version.lower() == 'siamese':
         train_dataset, val_dataset = get_siamese_dataset(cfg)
@@ -58,13 +67,22 @@ def train(cfg):
     max_ep = cfg.training.epochs if 'epochs' in cfg.training else 100
     batch_fraction = cfg.training.batch_fraction if 'batch_fraction' in cfg.training else 1.0
 
+    # if 'confidence' in cfg.training:
+        # filename = cfg.name + '_{epoch:02d}_{val_ddG_err_spearman:.02}'
+        # monitor = f'val_ddG_err_spearman'
+    # else:
     filename = cfg.name + '_{epoch:02d}_{val_ddG_spearman:.02}'
-    monitor = 'val_ddG_spearman'
+    monitor = f'val_ddG_spearman'
+        
     checkpoint_callback = ModelCheckpoint(monitor=monitor, mode='max', dirpath='checkpoints', filename=filename)
     logger = WandbLogger(project=cfg.project, name="test", log_model=False) if 'project' in cfg else None
     
     # start training
-    trainer = pl.Trainer(callbacks=[checkpoint_callback], logger=logger, log_every_n_steps=10, max_epochs=max_ep,
+    if 'rebatched' in cfg.dataset:
+        n_steps = 100
+    else:
+        n_steps = 10
+    trainer = pl.Trainer(callbacks=[checkpoint_callback], logger=logger, log_every_n_steps=n_steps, max_epochs=max_ep,
                          accelerator=cfg.platform.accel, devices=1, limit_train_batches=batch_fraction, limit_val_batches=batch_fraction)
     trainer.fit(model_pl, train_loader, val_loader)
 
