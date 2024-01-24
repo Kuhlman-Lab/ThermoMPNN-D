@@ -22,6 +22,8 @@ class TransferModelPLv2(pl.LightningModule):
         
         # enable confidence model training
         self.conf = cfg.training.confidence if 'confidence' in cfg.training else False
+        self.separate_heads = True if 'separate_heads' in cfg.model else False
+
         if self.conf:  # lambda for conf model loss
             self.conf_lambda = float(cfg.training.conf_lambda)
         else:
@@ -94,12 +96,15 @@ class TransferModelPLv2(pl.LightningModule):
             print('Loading double mutant aggregator params for optimizer!')
             param_list.append({"params": self.model.aggregator.parameters()})
 
+        if 'dist' in self.cfg.model:
+            param_list.append({"params": self.model.dist_norm.parameters()})
+
         if self.model.lightattn:  # adding light attention parameters
             print('Loading light attention layer params for optimizer!')
             param_list.append({"params": self.model.light_attention.parameters()})
 
-        if self.conf:
-            print('Loading confidence model params for optimizer!')
+        if self.conf or self.separate_heads:
+            print('Loading confidence/separate head model params for optimizer!')
             param_list.append({"params": self.model.conf_model.parameters()})
 
         mlp_params = [

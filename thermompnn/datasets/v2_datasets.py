@@ -587,10 +587,13 @@ class ddgBenchDatasetv2(torch.utils.data.Dataset):
         if mut_info is np.nan:  # to skip missing mutations for additive model
             return
 
-        # if len(mut_info.split(';')) > 2: # to get only double mutants
-            # return
-        # if len(mut_info.split(';')) < 3:
-            # return
+        if (self.cfg.dataset == 'ptmul') and ('double' not in self.cfg.data.mut_types):
+            if len(mut_info.split(';')) < 3: # skip double mutants if missing
+                return
+        if (self.cfg.dataset == 'ptmul') and ('higher' not in self.cfg.data.mut_types):
+            if len(mut_info.split(';')) > 2: # skip higher order mutants if missing
+                return
+
         
         if not self.rev:
             for mt in mut_info.split(';'):  # handle multiple mutations like for megascale
@@ -1117,7 +1120,10 @@ class MegaScaleDatasetv2Rebatched(MegaScaleDatasetv2Aug):
             tmp = df.loc[~df.mut_type.str.contains(":") & ~df.mut_type.str.contains("wt"), :].reset_index(drop=True)
             tmp = tmp.loc[tmp.WT_name.isin(self.wt_names)].reset_index(drop=True)
             
-            double_aug = self._augment_double_mutants(tmp)
+            # derive c value as inverse of batch_fraction
+            batch_c = 1 if 'batch_fraction' not in cfg.training else int(1/cfg.training.batch_fraction)
+            
+            double_aug = self._augment_double_mutants(tmp, c=batch_c)
             print('Generated %s augmented double mutations' % str(double_aug.shape[0]))
             double_aug['DIRECT'] = False
             df_list.append(double_aug)
@@ -1147,9 +1153,9 @@ class MegaScaleDatasetv2Rebatched(MegaScaleDatasetv2Aug):
         """Total sample count instead of batch count"""
         return self.df.shape[0]
     
-    def _augment_double_mutants(self, df):
+    def _augment_double_mutants(self, df, c=1):
         """Use pairs of single mutants and modeled structures to make new double mutant data points
-        Rewritten to be vectorized  - NOTE: not yet functional"""
+        Rewritten to be vectorized  - can handle arbitrary multiplication ratios"""
         
         new_df = df.copy(deep=True)
         # trim to only single mutants
@@ -1178,19 +1184,30 @@ class MegaScaleDatasetv2Rebatched(MegaScaleDatasetv2Aug):
             options = mutations[mask]
             ddgs_paired = ddgs[mask]
 
-            chosen = np.random.choice(np.arange(options.size), size=1)[0]
+            chosen = np.random.choice(np.arange(options.size), size=c)
+            
+            for ch in chosen:
+                new_ddg = ddgs_paired[ch]
+                new_ddg = float(new_ddg) - float(d)
 
-            new_ddg = ddgs_paired[chosen]
-            new_ddg = float(new_ddg) - float(d)
+                new_mut = options[ch]
+                new_mut = m[-1] + m[1:-1] + m[0] + ':' + new_mut
 
-            new_mut = options[chosen]
-            new_mut = m[-1] + m[1:-1] + m[0] + ':' + new_mut
-
-            mutation_list.append(new_mut)
-            ddg_list.append(new_ddg)
+                mutation_list.append(new_mut)
+                ddg_list.append(new_ddg)
         
-        new_df['mut_type'] = mutation_list
-        new_df['ddG_ML'] = ddg_list
+        # parse out offset values
+        tmp_df = new_df.copy(deep=True)
+        df_list = []
+        for c_i in range(c):
+            mut_chunk = mutation_list[c_i::c]
+            ddg_chunk = ddg_list[c_i::c]
+
+            tmp_df['mut_type'] = mut_chunk
+            tmp_df['ddG_ML'] = ddg_chunk
+            df_list.append(tmp_df)
+
+        new_df = pd.concat(df_list, axis=0)
         return new_df
 
     
@@ -1198,7 +1215,8 @@ class MegaScaleDatasetv2Rebatched(MegaScaleDatasetv2Aug):
         """Batch retrieval fxn - each batch is list of protein-mutation pairs (can be different proteins)."""
         row = self.df.iloc[index]
 
-        pdb_loc = '/work/users/d/i/dieckhau/rocklin_data/FINAL_results/'
+        pdb_loc = self.cfg.data_loc.rosetta_data
+        # pdb_loc = '/work/users/d/i/dieckhau/rocklin_data/FINAL_results/'
         wt_name = row.WT_name.rstrip(".pdb").replace("|",":")
         chain = 'A'  # all Rocklin proteins have chain A, since they're simulated
 
@@ -1224,10 +1242,9 @@ class MegaScaleDatasetv2Rebatched(MegaScaleDatasetv2Aug):
 
                 pt_file = os.path.join(pdb_loc, wt_name, 'pdb_models', f'{chain}[{wt_ros}{pos_ros}{mut_ros}].pt')
                 # if pt exists, it's way faster to load than using the pdb parser
-                # if os.path.isfile(pt_file):
-                    # pdb = torch.load(pt_file)
-                # else:
-                if True:
+                if os.path.isfile(pt_file):
+                    pdb = torch.load(pt_file)
+                else:
                     pdb_file = os.path.join(pdb_loc, wt_name, 'pdb_models', f'{chain}[{wt_ros}{pos_ros}{mut_ros}].pdb')
                     assert os.path.isfile(pdb_file)  # check that file exists
                     pdb = parse_PDB(pdb_file)[0]

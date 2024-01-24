@@ -4,7 +4,7 @@ platform:
 
 data_loc:
         megascale_csv: "/home/hdieckhaus/scripts/ThermoMPNN/data/mega_scale/Processed_K50_dG_datasets/Tsuboyama2023_Dataset2_Dataset3_20230416.csv"
-        megascale_splits: "/home/hdieckhaus/scripts/ThermoMPNN/thermompnn/datasets/splits/mega_splits.pkl"
+        megascale_splits: "/home/hdieckhaus/scripts/ThermoMPNN/data/mega_scale/mega_splits.pkl"
         megascale_pdbs: "/home/hdieckhaus/scripts/ThermoMPNN/data/mega_scale/AlphaFold_model_PDBs/"
 
         fireprot_csv: "/home/hdieckhaus/scripts/ThermoMPNN/data/fireprot/4_fireprotDB_bestpH.csv"
@@ -12,3 +12,4 @@ data_loc:
         fireprot_pdbs: "/home/hdieckhaus/scripts/ThermoMPNN/data/fireprot/pdbs/monomers/"
 
         misc_data: '/home/hdieckhaus/scripts/ThermoMPNN/data/'
+        rosetta_data: '/home/hdieckhaus/datasets/FINAL_results/'

@@ -1,30 +1,30 @@
 # project: ThermoMPNN_v2
-# name: EXP2.6.single.rebatched
+# name: EXP2.6.drm.aug.dist
 
 version: v2 # options: (v1, v2, siamese)
 
-# dataset: megascale-pt # options: (megascale, fireprot (v1 only))
-dataset: megascale-test  # for arbitrary batching process
-# dataset: ssym-inv
-
+# dataset: ptmul  # for arbitrary batching capability
+dataset: megascale-test
 data:
-  # mut_types: [single]
   mut_types: [double]
-  # mut_types: [double, double-aug]
+  # mut_types: [single]
+  # mut_types: [double, higher]
 
 training:
-  num_workers: 24
+  num_workers: 16
   learn_rate: 0.0001
-  epochs: 50
+  epochs: 100
   lr_schedule: true
   batch_size: 10000
 
 model:
   hidden_dims: [64, 32]
-  subtract_mut: true
-  mutant_embedding: false
-  single_target: false
+  subtract_mut: false
+  mutant_embedding: true
+  single_target: true
   num_final_layers: 2
   freeze_weights: true
   load_pretrained: true
   lightattn: true
+  aggregation: max
+  # separate_heads: true
