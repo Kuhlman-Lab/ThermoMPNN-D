@@ -1,14 +1,20 @@
 # project: ThermoMPNN_v2
-# name: EXP2.6.drm.aug.dist
+# name: EXP2.8.base.eps0.1
 
 version: v2 # options: (v1, v2, siamese)
 
-# dataset: ptmul  # for arbitrary batching capability
 dataset: megascale-test
+# dataset: fireprot-homologue-free
+# dataset: ssym-dir
+# dataset: ssym-inv
+
 data:
-  mut_types: [double]
-  # mut_types: [single]
-  # mut_types: [double, higher]
+  mut_types: [single]
+  side_chains: true
+  side_chain_rbfs: 16
+  side_chain_topk: 30
+  side_chain_augment_eps: 0.0
+  thru: true
 
 training:
   num_workers: 16
@@ -19,12 +25,10 @@ training:
 
 model:
   hidden_dims: [64, 32]
-  subtract_mut: false
-  mutant_embedding: true
-  single_target: true
+  subtract_mut: true
+  mutant_embedding: false
+  single_target: false
   num_final_layers: 2
   freeze_weights: true
   load_pretrained: true
   lightattn: true
-  aggregation: max
-  # separate_heads: true

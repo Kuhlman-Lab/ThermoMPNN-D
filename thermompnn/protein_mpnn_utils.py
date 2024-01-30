@@ -1309,6 +1309,8 @@ class ProteinMPNN(nn.Module):
         order_mask_backward = order_mask_backward * chain_applied
         mask_attend = torch.gather(order_mask_backward, 2, E_idx).unsqueeze(-1)
 
+        # TODO add single-residue decoding option here
+
         mask_1D = mask.view([mask.size(0), mask.size(1), 1, 1])
         mask_bw = mask_1D * mask_attend  # 1 if decoded already, 0 if not yet decoded
         mask_fw = mask_1D * (1. - mask_attend)  # inverse of bw mask
