@@ -14,7 +14,7 @@ from thermompnn.datasets.dataset_utils import Mutation, seq1_index_to_seq2_index
 
 
 def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict=None, omit_AA_dict=None, tied_positions_dict=None,
-                   pssm_dict=None, bias_by_res_dict=None, ca_only=False):
+                   pssm_dict=None, bias_by_res_dict=None, ca_only=False, side_chains=False):
     """ Pack and pad batch into torch tensors - modified to also handle mutation data"""
     alphabet = 'ACDEFGHIKLMNPQRSTVWYX'
     B = len(batch)
@@ -22,6 +22,8 @@ def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict
     L_max = max([len(b['seq']) for b in batch])
     if ca_only:
         X = np.zeros([B, L_max, 1, 3])
+    elif side_chains:
+        X = np.zeros([B, L_max, 14, 3])
     else:
         X = np.zeros([B, L_max, 4, 3])
     residue_idx = -100 * np.ones([B, L_max], dtype=np.int32)
@@ -132,6 +134,8 @@ def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict
                     x_chain = np.array(chain_coords[f'CA_chain_{letter}'])  # [chain_lenght,1,3] #CA_diff
                     if len(x_chain.shape) == 2:
                         x_chain = x_chain[:, None, :]
+                elif side_chains:
+                    x_chain = np.stack([chain_coords[c] for c in chain_coords.keys()], 1) # [chain_length, 14, 3]
                 else:
                     x_chain = np.stack([chain_coords[c] for c in
                                         [f'N_chain_{letter}', f'CA_chain_{letter}', f'C_chain_{letter}',
@@ -259,7 +263,11 @@ def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict
             MUT_MUT_AA[i, nm] = mutAAs[nm]
 
     isnan = np.isnan(X)
-    mask = np.isfinite(np.sum(X, (2, 3))).astype(np.float32)
+
+    # need to protect against "missing" side chains, else whole sequence will be flagged
+    mask = np.isfinite(np.sum(X[..., :4, :], (2, 3))).astype(np.float32)
+    # mask = np.isfinite(np.sum(X, (2, 3))).astype(np.float32)
+
     X[isnan] = 0.
 
     # Conversion
@@ -295,7 +303,7 @@ def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict
     MUT_MUT_AA = torch.from_numpy(MUT_MUT_AA).to(dtype=torch.long, device=device)
     MUT_DDG = torch.from_numpy(MUT_DDG).to(dtype=torch.float32, device=device)
 
-    return X_out, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, MUT_POS, MUT_WT_AA, MUT_MUT_AA, MUT_DDG
+    return X_out, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, MUT_POS, MUT_WT_AA, MUT_MUT_AA, MUT_DDG, np.prod(isnan, axis=-1)
 
 
 def batchify(lengths, batch_size=10000):
@@ -403,10 +411,12 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
 
         # load ALL pdb data only once
         self.pdb_data = {}
+        self.side_chains = self.cfg.data.side_chains if 'side_chains' in self.cfg.data else False
         for wt_name in tqdm(self.wt_names):
             wt_name = wt_name.split(".pdb")[0].replace("|",":")
             pdb_file = os.path.join(self.cfg.data_loc.megascale_pdbs, f"{wt_name}.pdb")
-            pdb = parse_PDB(pdb_file)
+            # henry get side chain parsing working
+            pdb = parse_PDB(pdb_file, side_chains=self.side_chains)
             self.pdb_data[wt_name] = pdb[0]
 
     def __len__(self):
@@ -453,7 +463,7 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
             pdb_list.append(tmp)
 
         # putting tied_featurize here means the CPU, not the GPU, handles it, and it is parallelized to each DataLoader
-        features = tied_featurize_mut(pdb_list, 'cpu')
+        features = tied_featurize_mut(pdb_list, 'cpu', side_chains=self.side_chains)
         return features
     
     def _add_reverse_mutations(self):
@@ -557,13 +567,14 @@ class ddgBenchDatasetv2(torch.utils.data.Dataset):
         self.wt_names = df.PDB.unique()
                  
         self.pdb_data = {}
-        
+        self.side_chains = self.cfg.data.side_chains if 'side_chains' in self.cfg.data else False
+
         # parse all PDBs first - treat each row as its own PDB
         for i, row in self.df.iterrows():
             fname = row.PDB[:-1]
             pdb_file = os.path.join(self.pdb_dir, f"{fname}.pdb")
             chain = [row.PDB[-1]]
-            pdb = alt_parse_PDB(pdb_file, chain)
+            pdb = alt_parse_PDB(pdb_file, input_chain_list=chain, side_chains=self.side_chains)
             self.pdb_data[i] = pdb[0]
 
     def __len__(self):
@@ -616,7 +627,7 @@ class ddgBenchDatasetv2(torch.utils.data.Dataset):
             old_idx = int(mut_info[1:-1])
             # print(f"{fname}{chain}_{wtAA}{old_idx}{mutAA}_relaxed.pdb")
             pdb_file = os.path.join(self.pdb_dir, f"{fname}{chain}_{wtAA}{old_idx}{mutAA}_relaxed.pdb")
-            pdb = alt_parse_PDB(pdb_file, chain)[0]
+            pdb = alt_parse_PDB(pdb_file, input_chain_list=chain, side_chains=self.side_chains)[0]
             pdb['mutation'] = Mutation([pdb_idx], [mutAA], [wtAA], ddG * -1, row.PDB[:-1])
         
         # if needed, update wt seq to match passed mutations
@@ -630,7 +641,7 @@ class ddgBenchDatasetv2(torch.utils.data.Dataset):
 
         tmp = deepcopy(pdb)  # this is hacky but it is needed or else it overwrites all PDBs with the last data point
         pdb_list.append(tmp)
-        features = tied_featurize_mut(pdb_list, 'cpu')
+        features = tied_featurize_mut(pdb_list, 'cpu', side_chains=self.side_chains)
         return features
 
         # ------ Old version set up for only single mutants ----- #
@@ -751,12 +762,13 @@ class FireProtDatasetv2(torch.utils.data.Dataset):
         self.cfg.training.batch_size = 100
         self.clusters = batchify(self.df.pdb_sequence.str.len().values, self.cfg.training.batch_size)
         print('Generated %s batches of size %s for %s split' % (str(len(self.clusters)), str(self.cfg.training.batch_size), self.split))
+        self.side_chains = self.cfg.data.side_chains if 'side_chains' in self.cfg.data else False
 
         self.pdb_data = {}
         for wt_name in tqdm(self.wt_names):
             wt_name = wt_name.rstrip('.pdb')
             pdb_file = os.path.join(self.cfg.data_loc.fireprot_pdbs, f"{wt_name}.pdb")
-            pdb = parse_PDB(pdb_file)
+            pdb = parse_PDB(pdb_file, side_chains=self.side_chains)
             self.pdb_data[wt_name] = pdb[0]
         
     def __len__(self):
@@ -789,7 +801,7 @@ class FireProtDatasetv2(torch.utils.data.Dataset):
             tmp = deepcopy(pdb)  # this is hacky but it is needed or else it overwrites all PDBs with the last data point
             pdb_list.append(tmp)
 
-        features = tied_featurize_mut(pdb_list, 'cpu')
+        features = tied_featurize_mut(pdb_list, 'cpu', side_chains=self.side_chains)
         return features
 
 

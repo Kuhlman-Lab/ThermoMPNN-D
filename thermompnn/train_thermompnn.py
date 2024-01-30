@@ -67,10 +67,6 @@ def train(cfg):
     max_ep = cfg.training.epochs if 'epochs' in cfg.training else 100
     batch_fraction = cfg.training.batch_fraction if 'batch_fraction' in cfg.training else 1.0
 
-    # if 'confidence' in cfg.training:
-        # filename = cfg.name + '_{epoch:02d}_{val_ddG_err_spearman:.02}'
-        # monitor = f'val_ddG_err_spearman'
-    # else:
     filename = cfg.name + '_{epoch:02d}_{val_ddG_spearman:.02}'
     monitor = f'val_ddG_spearman'
         

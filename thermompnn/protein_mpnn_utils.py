@@ -35,6 +35,21 @@ def _S_to_seq(S, mask):
     return seq
 
 
+def collapse_side_chains(xyz):
+    """Takes raw input coordinates [L, 37, 3] and converts to standard [L, 14, 3] format"""
+    # mask out nan values
+    exist = ~np.isnan(xyz)
+    new_xyz = np.zeros((xyz.shape[0], 14, xyz.shape[-1]))
+    # collect nonzero coordinates from mask into new padded sca array
+    for i in range(xyz.shape[0]):
+        idx = 0
+        for j in range(xyz.shape[1]):
+            if exist[i, j, 0]:
+                new_xyz[i, idx, :] = xyz[i, j, :]
+                idx += 1
+    new_xyz[new_xyz == 0] = np.nan
+    return new_xyz
+
 def parse_PDB_biounits(x, atoms=['N', 'CA', 'C'], chain=None):
     '''
   input:  x = PDB filename
@@ -152,13 +167,23 @@ def parse_PDB(path_to_pdb, input_chain_list=None, ca_only=False, side_chains=Fal
             else:
                 sidechain_atoms = ['N', 'CA', 'C', 'O']
             xyz, seq = parse_PDB_biounits(biounit, atoms=sidechain_atoms, chain=letter)
+
             if type(xyz) != str:
                 concat_seq += seq[0]
                 my_dict['seq_chain_' + letter] = seq[0]
                 coords_dict_chain = {}
                 if ca_only:
                     coords_dict_chain['CA_chain_' + letter] = xyz.tolist()
+                elif side_chains: # auto-load all atoms
+                    xyz = collapse_side_chains(xyz)
+                    sc_atoms = ["N", "CA", "C", "O", 
+                                  "SC1", "SC2", "SC3", "SC4", 
+                                  "SC5", "SC6", "SC7", "SC8", 
+                                  "SC9", "SC10"]
+                    for sc_idx, sca in enumerate(sc_atoms):
+                        coords_dict_chain[f'{sca}_chain_{letter}'] = xyz[:, sc_idx, :].tolist()                    
                 else:
+                    # TODO henry load variable coord dict sets
                     coords_dict_chain['N_chain_' + letter] = xyz[:, 0, :].tolist()
                     coords_dict_chain['CA_chain_' + letter] = xyz[:, 1, :].tolist()
                     coords_dict_chain['C_chain_' + letter] = xyz[:, 2, :].tolist()
@@ -305,24 +330,29 @@ def alt_parse_PDB(path_to_pdb, input_chain_list=None, ca_only=False, side_chains
                 sidechain_atoms = ['N', 'CA', 'C', 'O']
             xyz, seq, resn_list = alt_parse_PDB_biounits(biounit, atoms=sidechain_atoms, chain=letter)
 
-            # add chain resn set to list if exists
-            # new for multi-chain handling
-            # if len(resn_list) > 7:
-            #     check_chain = ''.join(resn_list[:8])
-            #     if check_chain != 'no_chain':
-            #         my_dict['resn_list'] += resn_list
-
+                
             if type(xyz) != str:
                 concat_seq += seq[0]
                 my_dict['seq_chain_' + letter] = seq[0]
                 coords_dict_chain = {}
                 if ca_only:
                     coords_dict_chain['CA_chain_' + letter] = xyz.tolist()
+                elif side_chains: # auto-load all atoms
+                    if side_chains:
+                        xyz = collapse_side_chains(xyz)
+                    sc_atoms = ["N", "CA", "C", "O", 
+                                  "SC1", "SC2", "SC3", "SC4", 
+                                  "SC5", "SC6", "SC7", "SC8", 
+                                  "SC9", "SC10"]
+                    for sc_idx, sca in enumerate(sc_atoms):
+                        coords_dict_chain[f'{sca}_chain_{letter}'] = xyz[:, sc_idx, :].tolist()    
                 else:
+                    # TODO henry handle variable letter list
                     coords_dict_chain['N_chain_' + letter] = xyz[:, 0, :].tolist()
                     coords_dict_chain['CA_chain_' + letter] = xyz[:, 1, :].tolist()
                     coords_dict_chain['C_chain_' + letter] = xyz[:, 2, :].tolist()
                     coords_dict_chain['O_chain_' + letter] = xyz[:, 3, :].tolist()
+                
                 my_dict['coords_chain_' + letter] = coords_dict_chain
                 s += 1
         fi = biounit.rfind("/")
@@ -849,34 +879,26 @@ class DecLayer(nn.Module):
 
     def forward(self, h_V, h_E, mask_V=None, mask_attend=None):
         """ Parallel computation of full transformer layer """
-        # print('h_V', h_V.shape)
-        # print('h_E', h_E.shape)
+
         # Concatenate h_V_i to h_E_ij
         h_V_expand = h_V.unsqueeze(-2).expand(-1, -1, h_E.size(-2), -1)
-        # print('h_V_expand', h_V_expand.shape)
         h_EV = torch.cat([h_V_expand, h_E], -1)
-        # print('h_EV', h_EV.shape)
 
         # use MLP to construct message
         h_message = self.W3(self.act(self.W2(self.act(self.W1(h_EV)))))
-        # print('h_message', h_message.shape)
 
         # optional: attend to message
         if mask_attend is not None:
             h_message = mask_attend.unsqueeze(-1) * h_message
 
-        # aggregate message?
+        # aggregate message
         dh = torch.sum(h_message, -2) / self.scale
-        # print('dh', dh.shape)
 
         h_V = self.norm1(h_V + self.dropout1(dh))
-        # print('h_V', h_V.shape)
 
         # Position-wise feedforward
         dh = self.dense(h_V)
-        # print('dh', dh.shape)
         h_V = self.norm2(h_V + self.dropout2(dh))
-        # print('h_V', h_V.shape)
 
         # mask again?
         if mask_V is not None:

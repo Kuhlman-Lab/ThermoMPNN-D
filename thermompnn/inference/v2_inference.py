@@ -38,7 +38,7 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
             # preds += [-10000 for n in ]
             continue
         # X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, ddG_err = batch
-        X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs = batch
+        X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask = batch
 
         X = X.to(device)
         S = S.to(device)
@@ -51,10 +51,10 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
         mut_wildtype_AAs = mut_wildtype_AAs.to(device)
         mut_mutant_AAs = mut_mutant_AAs.to(device)
         mut_ddGs = mut_ddGs.to(device)
-        
+        atom_mask = torch.Tensor(atom_mask).to(device)
         # ddG_err = ddG_err.to(device)
 
-        pred, _ = model(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs)
+        pred, _ = model(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask)
 
         # for conf model validation
         # mut_ddGs = torch.abs(pred - mut_ddGs)

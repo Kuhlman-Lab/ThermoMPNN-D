@@ -23,6 +23,7 @@ class TransferModelPLv2(pl.LightningModule):
         # enable confidence model training
         self.conf = cfg.training.confidence if 'confidence' in cfg.training else False
         self.separate_heads = True if 'separate_heads' in cfg.model else False
+        self.side_chains = self.cfg.data.side_chains if 'side_chains' in self.cfg.data else False
 
         if self.conf:  # lambda for conf model loss
             self.conf_lambda = float(cfg.training.conf_lambda)
@@ -47,14 +48,14 @@ class TransferModelPLv2(pl.LightningModule):
 
     def shared_eval(self, batch, batch_idx, prefix):
 
-        X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs = batch
+        X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask = batch
         if self.conf:
             preds, pred_error = self(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs)
             true_error = torch.abs(preds.detach() - mut_ddGs)
             # one loss call for the whole batch
             mse = F.mse_loss(preds, mut_ddGs) + F.mse_loss(pred_error, true_error) * self.conf_lambda
         else:
-            preds, _ = self(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs)
+            preds, _ = self(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask)
             mse = F.mse_loss(preds, mut_ddGs)
 
         for out in self.out:
@@ -106,6 +107,10 @@ class TransferModelPLv2(pl.LightningModule):
         if self.conf or self.separate_heads:
             print('Loading confidence/separate head model params for optimizer!')
             param_list.append({"params": self.model.conf_model.parameters()})
+
+        if self.side_chains:
+            print('Loading side chain encoder module params for optimizer!')
+            param_list.append({"params": self.model.side_chain_features.parameters()})
 
         mlp_params = [
             {"params": self.model.ddg_out.parameters()}

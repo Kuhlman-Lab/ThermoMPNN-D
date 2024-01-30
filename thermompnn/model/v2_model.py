@@ -3,7 +3,7 @@ import torch.nn as nn
 from itertools import permutations
 import numpy as np
 
-from thermompnn.model.modules import get_protein_mpnn, LightAttention, MPNNLayer
+from thermompnn.model.modules import get_protein_mpnn, LightAttention, MPNNLayer, SideChainModule
 
 
 def batched_index_select(input, dim, index):
@@ -48,6 +48,7 @@ class TransferModelv2(nn.Module):
         self.mpnn_edges = True if 'edges' in cfg.model else False
         self.dist = True if 'dist' in cfg.model else False
         self.separate_heads = True if 'separate_heads' in cfg.model else False
+        self.side_chains = self.cfg.data.side_chains if 'side_chains' in self.cfg.data else False
 
         self.prot_mpnn = get_protein_mpnn(cfg)
                 
@@ -61,6 +62,10 @@ class TransferModelv2(nn.Module):
         elif self.dist:
             print('Enabling pairwise dist features')
             EMBED_DIM += 25
+            
+        if self.side_chains:
+            print('Enabling side chains!')
+            EMBED_DIM += 128
 
         HIDDEN_DIM = 128
         VOCAB_DIM = 21 if not self.single_target else 1
@@ -122,6 +127,16 @@ class TransferModelv2(nn.Module):
         if self.dist:
             self.dist_norm = nn.LayerNorm(25)  # do normalization of raw dist values
 
+        if self.side_chains:
+            self.sc_rbfs = self.cfg.data.side_chain_rbfs if 'side_chain_rbfs' in self.cfg.data else 16
+            self.sc_augment_eps = self.cfg.data.side_chain_augment_eps if 'side_chain_augment_eps' in self.cfg.data else 0.0
+            self.sc_topk = self.cfg.data.side_chain_topk if 'side_chain_topk' in self.cfg.data else 30
+            print('Side chain params:', '\n', 'RBFs:', self.sc_rbfs, '\nAugment_eps:', self.sc_augment_eps)
+            self.sc_thru = self.cfg.data.thru if 'thru' in self.cfg.data else False
+            self.side_chain_features = SideChainModule(num_positional_embeddings=16, num_rbf=self.sc_rbfs, 
+                                                       node_features=128, edge_features=128, 
+                                                       top_k=self.sc_topk, augment_eps=self.sc_augment_eps, encoder_layers=1, thru=self.sc_thru)
+
         self.ddg_out = nn.Sequential()
 
         if self.double_mutations and self.aggregation != 'mpnn':
@@ -151,12 +166,15 @@ class TransferModelv2(nn.Module):
         Cb = Cb.unsqueeze(2)
         return torch.cat([Cb, X], axis=2)
 
-    def forward(self, X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs):
+    def forward(self, X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask):
         """Vectorized fwd function for arbitrary batches of mutations"""
 
-        # getting ProteinMPNN embeddings
-        all_mpnn_hid, mpnn_embed, _, mpnn_edges = self.prot_mpnn(X, S, mask, chain_M, residue_idx, chain_encoding_all)
-
+        # getting ProteinMPNN embeddings (use only backbone atoms)
+        if self.side_chains:
+            all_mpnn_hid, mpnn_embed, _, mpnn_edges = self.prot_mpnn(X[:, :, :4, :], S, mask, chain_M, residue_idx, chain_encoding_all)
+        else:
+            all_mpnn_hid, mpnn_embed, _, mpnn_edges = self.prot_mpnn(X, S, mask, chain_M, residue_idx, chain_encoding_all)
+        
         if self.dist:
             X = self._get_cbeta(X)
 
@@ -373,20 +391,26 @@ class TransferModelv2(nn.Module):
                     raise ValueError("Invalid aggregation function selected")
 
         else:  # standard (single-mutation) indexing
+            
+            if self.side_chains:
+                side_chain_embeds = self.side_chain_features(X, S, mask, chain_M, residue_idx, chain_encoding_all, all_mpnn_hid[0], atom_mask)
+                
             if self.num_final_layers > 0:
                 all_mpnn_hid = torch.cat(all_mpnn_hid[:self.num_final_layers], -1)
+                embeds_all = [all_mpnn_hid, mpnn_embed]
                 if self.mutant_embedding:
                     mut_embed = self.prot_mpnn.W_s(mut_mutant_AAs[:, 0])
-                embeds_all = [all_mpnn_hid, mpnn_embed]
+                    embeds_all.append(mut_embed)
                 if self.mpnn_edges:  # add edges to input for gathering
                     # the self-edge is the edge with index ZERO for each position L
                     mpnn_edges = mpnn_edges[:, :, 0, :]  # index 2 is the K neighbors index
                     # E_idx is [B, L, K] and is a tensor of indices in X that should match neighbors
-                    # for a given position L, what is the K closest neighbor?
                     embeds_all.append(mpnn_edges)
+                
+                if self.side_chains:
+                    embeds_all.append(side_chain_embeds)
                     
             mpnn_embed = torch.cat(embeds_all, -1)
-
             # vectorized indexing of the embeddings (this is very ugly but the best I can do for now)
             # unsqueeze gets mut_pos to shape (batch, 1, 1), then this is copied with expand to be shape (batch, 1, embed_dim) for gather
             mpnn_embed = torch.gather(mpnn_embed, 1, mut_positions.unsqueeze(-1).expand(mut_positions.size(0), mut_positions.size(1), mpnn_embed.size(2)))
@@ -399,7 +423,7 @@ class TransferModelv2(nn.Module):
         ddg = self.ddg_out(mpnn_embed)  # shape: (batch, 21)
         
         if self.conf or self.separate_heads:
-            # single mutant predictions HERE
+            # single mutant predictions HERE if co-training with separate heads
             conf = self.conf_model(mpnn_embed)
         else:
             conf = None
@@ -419,5 +443,5 @@ class TransferModelv2(nn.Module):
                 return conf, None
             # mask -1 row is True if single mutant - replace all these with conf outputs
             ddg[mask[:, -1]] = conf[mask[:, -1]]
-           
+            
         return ddg, conf

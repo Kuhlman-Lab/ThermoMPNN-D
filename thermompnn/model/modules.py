@@ -3,8 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 import os
+import numpy as np
 
-from thermompnn.protein_mpnn_utils import ProteinMPNN, PositionWiseFeedForward
+from thermompnn.protein_mpnn_utils import ProteinMPNN
+from protein_mpnn_utils import gather_nodes, gather_edges, DecLayer, cat_neighbors_nodes, PositionWiseFeedForward
 
 
 def get_protein_mpnn(cfg, version='v_48_020.pt'):
@@ -39,6 +41,272 @@ def get_protein_mpnn(cfg, version='v_48_020.pt'):
             param.requires_grad = False
 
     return model
+
+
+class SideChainPositionalEncodings(nn.Module):
+    def __init__(self, num_embeddings, period_range=[2,1000], max_relative_feature=32, af2_relpos=False):
+        super(SideChainPositionalEncodings, self).__init__()
+        self.num_embeddings = num_embeddings
+        self.period_range = period_range
+        self.max_relative_feature = max_relative_feature 
+        self.af2_relpos = af2_relpos
+        
+    def _transformer_encoding(self, E_idx):
+        # i-j
+        N_nodes = E_idx.size(1)
+        ii = torch.arange(N_nodes, dtype=torch.float32, device=E_idx.device).view((1, -1, 1))
+        d = (E_idx.float() - ii).unsqueeze(-1)
+        
+        # Original Transformer frequencies
+        frequency = torch.exp(
+            torch.arange(0, self.num_embeddings, 2, dtype=torch.float32, device=E_idx.device)
+            * -(np.log(10000.0) / self.num_embeddings)
+        )
+        
+        angles = d * frequency.view((1,1,1,-1))
+        E = torch.cat((torch.cos(angles), torch.sin(angles)), -1)
+        
+        return E
+    
+    def _af2_encoding(self, E_idx, residue_index=None):
+        # i-j
+        if residue_index is not None:
+            offset = residue_index[..., None] - residue_index[..., None, :]
+            offset = torch.gather(offset, -1, E_idx)
+        else:
+            N_nodes = E_idx.size(1)
+            ii = torch.arange(N_nodes, dtype=torch.float32, device=E_idx.device).view((1, -1, 1))
+            offset = (E_idx.float() - ii)
+        
+        relpos = torch.clip(offset.long() + self.max_relative_feature, 0, 2 * self.max_relative_feature)
+        relpos = F.one_hot(relpos, 2 * self.max_relative_feature + 1)
+        
+        return relpos
+
+    def forward(self, E_idx, residue_index=None):
+
+        if self.af2_relpos:
+            E = self._af2_encoding(E_idx, residue_index)
+        else:
+            E = self._transformer_encoding(E_idx)
+
+        return E
+    
+
+class SideChainProteinFeatures(nn.Module):
+    def __init__(self, edge_features, node_features, num_positional_embeddings=16,
+                 num_rbf=16, top_k=30, augment_eps=0., num_chain_embeddings=16):
+        """ Extract protein features """
+        super(SideChainProteinFeatures, self).__init__()
+        self.edge_features = edge_features
+        self.top_k = top_k
+        self.augment_eps = augment_eps
+        self.num_rbf = num_rbf
+        self.num_positional_embeddings = num_positional_embeddings
+
+        self.embeddings = SideChainPositionalEncodings(num_positional_embeddings)
+        edge_in = num_positional_embeddings + num_rbf * (14 ** 2)
+        self.edge_embedding = nn.Linear(edge_in, edge_features, bias=False)
+        self.norm_edges = nn.LayerNorm(edge_features)
+
+    def _dist(self, X, mask, eps=1E-6):
+        """ Pairwise euclidean distances """
+        # Convolutional network on NCHW
+        mask_2D = torch.unsqueeze(mask,1) * torch.unsqueeze(mask,2)
+        dX = torch.unsqueeze(X,1) - torch.unsqueeze(X,2)
+        D = mask_2D * torch.sqrt(torch.sum(dX**2, 3) + eps)
+
+        # Identify k nearest neighbors (including self)
+        D_max, _ = torch.max(D, -1, keepdim=True)
+        D_adjust = D + 2 * (1. - mask_2D) * D_max
+        D_neighbors, E_idx = torch.topk(D_adjust, min(self.top_k, X.shape[-2]), dim=-1, largest=False)
+        mask_neighbors = gather_edges(mask_2D.unsqueeze(-1), E_idx)
+
+        return D_neighbors, E_idx, mask_neighbors
+
+    def _rbf(self, D):
+        # Distance radial basis function
+        D_min, D_max, D_count = 0., 20., self.num_rbf
+        D_mu = torch.linspace(D_min, D_max, D_count, device=D.device)
+        D_mu = D_mu.view([1,1,1,-1])
+        D_sigma = (D_max - D_min) / D_count
+        D_expand = torch.unsqueeze(D, -1)
+        RBF = torch.exp(-((D_expand - D_mu) / D_sigma)**2)
+
+        return RBF
+
+    def _get_rbf(self, A, B, E_idx, A_mask, B_mask):
+        D_A_B = torch.sqrt(torch.sum((A[:,:,None,:] - B[:,None,:,:])**2,-1) + 1e-6) #[B, L, L]
+        D_A_B_neighbors = gather_edges(D_A_B[:,:,:,None], E_idx)[:,:,:,0] #[B,L,K]
+
+        # make pairwise atom mask
+        combo = torch.unsqueeze(torch.unsqueeze(A_mask, 2) * torch.unsqueeze(B_mask, 1), -1) # [B, L, L, 1]
+
+        # gather K neighbors out of overall mask        
+        combo = torch.unsqueeze(gather_edges(combo, E_idx)[..., 0], -1) # [B, L, K, 1]
+        
+        # mask RBFs directly using paired atom mask
+        # RBF_A_B = self._rbf(D_A_B_neighbors)
+        RBF_A_B = self._rbf(D_A_B_neighbors) * combo.expand(combo.shape[0], combo.shape[1], combo.shape[2], self.num_rbf) # [B, L, K, N_RBF]
+        return RBF_A_B
+
+    def _impute_CB(self, N, CA, C):
+        b = CA - N
+        c = C - CA
+        a = torch.cross(b, c, dim=-1)
+        Cb = -0.58273431*a + 0.56802827*b - 0.54067466*c + CA
+        return Cb
+
+    def _atomic_distances(self, X, E_idx, atom_mask):
+        RBF_all = []
+        
+        for i in range(X.shape[-2]):
+            for j in range(X.shape[-2]):
+                # pass specific  atom masks to RBF fxn
+                RBF_all.append(self._get_rbf(X[..., i, :], X[..., j, :], E_idx, atom_mask[..., i], atom_mask[..., j]))
+
+        RBF_all = torch.cat(tuple(RBF_all), dim=-1)        
+        return RBF_all
+
+    def forward(self, X, mask, residue_idx, chain_labels, atom_mask):
+        
+        if self.augment_eps > 0:
+            X = X + self.augment_eps * torch.randn_like(X)
+
+        # Build k-Nearest Neighbors graph
+        X_ca = X[:,:,1,:]
+        _, E_idx, _ = self._dist(X_ca, mask)
+        
+        # Pairwise embeddings
+        E_positional = self.embeddings(E_idx, residue_idx)
+        
+        # Pairwise bb atomic distances
+        Ca = X[:, :, 1, :]
+        N = X[:, :, 0, :]
+        C = X[:, :, 2, :]
+        O = X[:, :, 3, :]
+        Cb = self._impute_CB(N, Ca, C)
+        sc_atoms = X[..., 5:, :]
+        X2 = torch.stack((N, Ca, C, O, Cb), dim=-2)
+        X2 = torch.cat((X2, sc_atoms), dim=-2) 
+        RBF_all = self._atomic_distances(X2, E_idx, 1 - atom_mask)
+        E = torch.cat((E_positional, RBF_all), -1)
+        
+        # Embed edges
+        E = self.edge_embedding(E)
+        E = self.norm_edges(E)
+        return E, E_idx
+
+
+class SideChainModule(nn.Module):
+    def __init__(self, num_positional_embeddings=16, num_rbf=16, 
+                 node_features=128, edge_features=128, top_k=30, augment_eps=0., encoder_layers=1, hidden_dim=128, 
+                 thru=False):
+        super(SideChainModule, self).__init__()
+                
+        vocab=21
+        dropout=0.1
+        self.augment_eps = augment_eps
+
+        self.features = SideChainProteinFeatures(node_features, edge_features, top_k=top_k, augment_eps=augment_eps, 
+                                                 num_rbf=num_rbf, num_positional_embeddings=num_positional_embeddings)
+        
+        self.W_e = nn.Linear(edge_features, hidden_dim, bias=True)
+        
+        # self.W_s = nn.Embedding(vocab, hidden_dim)
+        self.thru = thru
+        
+        if self.thru:
+            num_in = 128 + 128
+        else:
+            num_in = 128     
+        self.sc_agg = SimpleMPNNAgg(num_hidden=128, num_in=num_in, dropout=0.1, scale=top_k)
+        
+        # self.sc_layers = nn.ModuleList([
+        #     DecLayer(hidden_dim, hidden_dim*3, dropout=dropout)
+        #     for _ in range(encoder_layers)
+        # ])
+    
+    def forward(self, X, S, mask, chain_M, residue_idx, chain_encoding_all, h_V, atom_mask):
+        # generate features (RBFs and positional encodings)
+        if self.augment_eps > 0:
+            X = X + self.augment_eps * torch.randn_like(X)
+        
+        E, E_idx = self.features(X, mask, residue_idx, chain_encoding_all, atom_mask)
+        
+        # make hidden dim encoding
+        h_E = self.W_e(E) # [B, L, K, H]
+        
+        # embed sequence nodes
+        # h_S = self.W_s(S) # [B, L, H]
+        
+        # grab neighbor sequence nodes
+        # h_ES = cat_neighbors_nodes(h_S, h_E, E_idx) # [B, L, K, H * 2]
+
+        # mask keeping all residues except padding
+        mask_attend = gather_nodes(mask.unsqueeze(-1), E_idx).squeeze(-1)
+        mask_attend = mask.unsqueeze(-1) * mask_attend
+
+        # TODO add handling for using existing h_V
+        if self.thru:
+            h_V_expand = h_V.unsqueeze(-2).expand(-1, -1, h_E.size(-2), -1)
+            h_EV = torch.cat([h_V_expand, h_E], -1)
+            h_V = self.sc_agg(h_EV, mask_attend)
+        else:  
+            h_V = self.sc_agg(h_E, mask_attend) # [B, L, H]
+        
+        # for layer in self.sc_layers:
+        #     # decoder layers do node updates only, using node + seq + edge information
+        #     h_ESV = cat_neighbors_nodes(h_V, h_ES, E_idx)
+        #     print(h_ESV.shape , mask.attend.shape)
+        #     h_ESV = mask_attend * h_ESV
+        #     h_V = layer(h_V, h_ESV, mask)
+        
+        return h_V
+
+
+class SimpleMPNNAgg(nn.Module):
+    def __init__(self, num_hidden, num_in, dropout=0.1, scale=30):
+        super(SimpleMPNNAgg, self).__init__()
+
+        self.scale = scale
+        self.dropout1 = nn.Dropout(dropout)
+        # self.dropout2 = nn.Dropout(dropout)
+        self.norm1 = nn.LayerNorm(num_hidden)
+        # self.norm2 = nn.LayerNorm(num_hidden)
+
+        self.W1 = nn.Linear(num_in, num_hidden, bias=True)
+        self.W2 = nn.Linear(num_hidden, num_hidden, bias=True)
+        self.W3 = nn.Linear(num_hidden, num_hidden, bias=True)
+        # self.dense = PositionWiseFeedForward(num_hidden, num_hidden * 4)
+
+        self.act = torch.nn.GELU()
+
+    def forward(self, edges, mask=None):
+        """ 
+        Parallel computation of full transformer layer 
+        Message passing to make nodes out of edges without any prior nodes
+        """
+
+        # use MLP to construct message
+        h_message = self.W3(self.act(self.W2(self.act(self.W1(edges)))))
+
+        # optional: attend to message
+        if mask is not None:
+            h_message = mask.unsqueeze(-1) * h_message
+
+        # aggregate message
+        dh = torch.sum(h_message, -2) / self.scale
+        h_V = self.norm1(self.dropout1(dh))
+
+        # Position-wise feedforward
+        # dh = self.dense(h_V)
+        
+        # do self-update
+        # h_V = self.norm2(h_V + self.dropout2(dh))
+
+        return h_V
+
 
 
 class LightAttention(nn.Module):
