@@ -95,7 +95,7 @@ class SideChainPositionalEncodings(nn.Module):
 
 class SideChainProteinFeatures(nn.Module):
     def __init__(self, edge_features, node_features, num_positional_embeddings=16,
-                 num_rbf=16, top_k=30, augment_eps=0., num_chain_embeddings=16):
+                 num_rbf=16, top_k=30, augment_eps=0., num_chain_embeddings=16, action_centers='none'):
         """ Extract protein features """
         super(SideChainProteinFeatures, self).__init__()
         self.edge_features = edge_features
@@ -103,9 +103,15 @@ class SideChainProteinFeatures(nn.Module):
         self.augment_eps = augment_eps
         self.num_rbf = num_rbf
         self.num_positional_embeddings = num_positional_embeddings
+        self.action_centers = action_centers
 
         self.embeddings = SideChainPositionalEncodings(num_positional_embeddings)
-        edge_in = num_positional_embeddings + num_rbf * (14 ** 2)
+        if action_centers != 'none':
+            edge_in = num_positional_embeddings + num_rbf * (5 ** 2)
+        else:
+            edge_in = num_positional_embeddings + num_rbf * (14 ** 2)
+        print('edge in:', edge_in)
+
         self.edge_embedding = nn.Linear(edge_in, edge_features, bias=False)
         self.norm_edges = nn.LayerNorm(edge_features)
 
@@ -160,13 +166,48 @@ class SideChainProteinFeatures(nn.Module):
     def _atomic_distances(self, X, E_idx, atom_mask):
         RBF_all = []
         
+        if self.action_centers != 'none':
+            X, atom_mask = self._action_centers(X, atom_mask)
+        
         for i in range(X.shape[-2]):
             for j in range(X.shape[-2]):
                 # pass specific  atom masks to RBF fxn
                 RBF_all.append(self._get_rbf(X[..., i, :], X[..., j, :], E_idx, atom_mask[..., i], atom_mask[..., j]))
 
-        RBF_all = torch.cat(tuple(RBF_all), dim=-1)        
+        RBF_all = torch.cat(tuple(RBF_all), dim=-1)    
         return RBF_all
+    
+    def _action_centers(self, X, atom_mask):
+        """Takes full coord set [B, L, 14, 3] and atom mask [B, L, 14]
+        returns X with appended action center [B, L, 5, 3] and updated atom mask [B, L, 5]        
+        """
+        if self.action_centers == 'com':
+            
+            # taking mean position of valid side chain atoms
+            X_m = X[:, :, 4:, :] * atom_mask[:, :, 4:, None].repeat(1, 1, 1, 3)
+            X_m[X_m == 0.] = torch.nan
+            X_ac = torch.nanmean(X_m, dim=-2)
+            
+            X_ac[X_ac.isnan()] = X[:, :, 4, :][X_ac.isnan()] # if missing side chain, just use virtual Cb
+            X_ac = torch.nan_to_num(X_ac) # just-in-case fill with zeros
+            # add action center back onto the X info
+            X = torch.cat([X[:, :, :4, :], X_ac[:, :, None, :]], dim=-2)
+            atom_mask = atom_mask[:, :, :5]
+            return X, atom_mask
+
+        elif self.action_centers == 'eoc':
+            
+            # retrieve last valid atom from each residue
+            num_atoms = torch.sum(atom_mask, dim=-1) # [B, L]
+            num_atoms = num_atoms[:, :, None, None].repeat(1, 1, 1, 3) # [B, L, 1, 3]
+            num_atoms[num_atoms <= 0] = 1 # if no atoms exist, need to keep from throwing index error
+            X_ac = torch.gather(X, dim=-2, index=num_atoms - 1) # [B, L, 1, 3]
+            X = torch.cat([X[:, :, :4, :], X_ac], dim=-2) # [B, L, 5, 3]
+            atom_mask = atom_mask[:, :, :5] # [B, L, 5]
+            return X, atom_mask
+        
+        else:
+            raise ValueError("Invalid action center setting!")
 
     def forward(self, X, mask, residue_idx, chain_labels, atom_mask):
         
@@ -191,7 +232,7 @@ class SideChainProteinFeatures(nn.Module):
         X2 = torch.cat((X2, sc_atoms), dim=-2) 
         RBF_all = self._atomic_distances(X2, E_idx, 1 - atom_mask)
         E = torch.cat((E_positional, RBF_all), -1)
-        
+
         # Embed edges
         E = self.edge_embedding(E)
         E = self.norm_edges(E)
@@ -201,7 +242,7 @@ class SideChainProteinFeatures(nn.Module):
 class SideChainModule(nn.Module):
     def __init__(self, num_positional_embeddings=16, num_rbf=16, 
                  node_features=128, edge_features=128, top_k=30, augment_eps=0., encoder_layers=1, hidden_dim=128, 
-                 thru=False):
+                 thru=False, action_centers='none'):
         super(SideChainModule, self).__init__()
                 
         vocab=21
@@ -209,7 +250,8 @@ class SideChainModule(nn.Module):
         self.augment_eps = augment_eps
 
         self.features = SideChainProteinFeatures(node_features, edge_features, top_k=top_k, augment_eps=augment_eps, 
-                                                 num_rbf=num_rbf, num_positional_embeddings=num_positional_embeddings)
+                                                 num_rbf=num_rbf, num_positional_embeddings=num_positional_embeddings, 
+                                                 action_centers=action_centers)
         
         self.W_e = nn.Linear(edge_features, hidden_dim, bias=True)
         

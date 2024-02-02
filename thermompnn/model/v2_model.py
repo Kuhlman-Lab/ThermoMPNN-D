@@ -49,6 +49,7 @@ class TransferModelv2(nn.Module):
         self.dist = True if 'dist' in cfg.model else False
         self.separate_heads = True if 'separate_heads' in cfg.model else False
         self.side_chains = self.cfg.data.side_chains if 'side_chains' in self.cfg.data else False
+        self.action_centers = self.cfg.data.action_centers if 'action_centers' in self.cfg.data else 'none'
 
         self.prot_mpnn = get_protein_mpnn(cfg)
                 
@@ -135,7 +136,8 @@ class TransferModelv2(nn.Module):
             self.sc_thru = self.cfg.data.thru if 'thru' in self.cfg.data else False
             self.side_chain_features = SideChainModule(num_positional_embeddings=16, num_rbf=self.sc_rbfs, 
                                                        node_features=128, edge_features=128, 
-                                                       top_k=self.sc_topk, augment_eps=self.sc_augment_eps, encoder_layers=1, thru=self.sc_thru)
+                                                       top_k=self.sc_topk, augment_eps=self.sc_augment_eps, encoder_layers=1, thru=self.sc_thru, 
+                                                       action_centers=self.action_centers)
 
         self.ddg_out = nn.Sequential()
 
