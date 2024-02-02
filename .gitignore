@@ -144,6 +144,7 @@ proteinmpnn/models
 inbox/
 test.yaml
 test.sh
+proteinmpnn/*
 
 jobs
 # local.yaml

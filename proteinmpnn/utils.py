@@ -159,7 +159,7 @@ def get_std_opt(parameters, d_model, step):
     )
 
 
-def get_pdbs(data_loader, repeat=1, max_length=10000, num_units=1000000, side_chains=-1):
+def get_pdbs(data_loader, repeat=1, max_length=10000, num_units=1000000, side_chains=False):
     init_alphabet = ['A', 'B', 'C', 'D', 'E', 'F', 'G','H', 'I', 'J','K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T','U', 'V','W','X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g','h', 'i', 'j','k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't','u', 'v','w','x', 'y', 'z']
     extra_alphabet = [str(item) for item in list(np.arange(300))]
     chain_alphabet = init_alphabet + extra_alphabet
@@ -177,11 +177,10 @@ def get_pdbs(data_loader, repeat=1, max_length=10000, num_units=1000000, side_ch
                 mask_list = []
                 visible_list = []
 
-                if side_chains == -1:
+                if not side_chains:
                     atom_names = ["N", "CA", "C", "O"]
                 else:
                     atom_names = ["N", "CA", "C", "O", "SC1", "SC2", "SC3", "SC4", "SC5", "SC6", "SC7", "SC8", "SC9", "SC10"]
-                    atom_names = atom_names[:side_chains]
 
                 if len(list(np.unique(t['idx']))) < 352:
                     for idx in list(np.unique(t['idx'])):
@@ -220,7 +219,7 @@ def get_pdbs(data_loader, repeat=1, max_length=10000, num_units=1000000, side_ch
                             coords_dict_chain = {}
                             all_atoms = np.array(t['xyz'][res,])[0,] #[L, 14, 3]
 
-                            if side_chains == -1:  # just grab first 4 atoms, which should always be backbone
+                            if not side_chains:  # just grab first 4 atoms, which should always be backbone
                                 all_atoms = all_atoms[:, :4, :]
 
                             # regardless of side_chain flag, use same loop to fill coord dict

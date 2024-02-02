@@ -139,8 +139,11 @@ class SideChainProteinFeatures(nn.Module):
         D_A_B = torch.sqrt(torch.sum((A[:,:,None,:] - B[:,None,:,:])**2,-1) + 1e-6) #[B, L, L]
         D_A_B_neighbors = gather_edges(D_A_B[:,:,:,None], E_idx)[:,:,:,0] #[B,L,K]
 
-        # make pairwise atom mask
+        # make pairwise atom mask - ORIG config
         combo = torch.unsqueeze(torch.unsqueeze(A_mask, 2) * torch.unsqueeze(B_mask, 1), -1) # [B, L, L, 1]
+        
+        # TODO henry try both combinations - ALT config (name=transp)
+        # combo = torch.unsqueeze(torch.unsqueeze(A_mask, 1) * torch.unsqueeze(B_mask, 2), -1) # [B, L, L, 1]
 
         # gather K neighbors out of overall mask        
         combo = torch.unsqueeze(gather_edges(combo, E_idx)[..., 0], -1) # [B, L, K, 1]

@@ -18,7 +18,7 @@ def main(args):
     import subprocess
     from concurrent.futures import ProcessPoolExecutor    
     from utils import worker_init_fn, get_pdbs, loader_pdb, build_training_clusters, PDB_dataset, StructureDataset, StructureLoader
-    from model_utils import featurize, loss_smoothed, loss_nll, get_std_opt, ProteinMPNN, ProteinMPNN_SRR
+    from model_utils import featurize, loss_smoothed, loss_nll, get_std_opt, ProteinMPNN
     from tqdm import tqdm
 
     scaler = torch.cuda.amp.GradScaler()
@@ -73,29 +73,19 @@ def main(args):
     valid_set = PDB_dataset(list(valid.keys()), loader_pdb, valid, params)
     valid_loader = torch.utils.data.DataLoader(valid_set, worker_init_fn=worker_init_fn, **LOAD_PARAM)
 
-    if args.single_res_rec:
-        model = ProteinMPNN_SRR(node_features=args.hidden_dim,
-                            edge_features=args.hidden_dim,
-                            hidden_dim=args.hidden_dim,
-                            num_encoder_layers=args.num_encoder_layers,
-                            num_decoder_layers=args.num_encoder_layers,
-                            k_neighbors=args.num_neighbors,
-                            dropout=args.dropout,
-                            augment_eps=args.backbone_noise,
-                            use_ipmp=args.use_ipmp,
-                            n_points=args.n_points)
-    else:
-        model = ProteinMPNN(node_features=args.hidden_dim,
-                            edge_features=args.hidden_dim,
-                            hidden_dim=args.hidden_dim,
-                            num_encoder_layers=args.num_encoder_layers,
-                            num_decoder_layers=args.num_encoder_layers,
-                            k_neighbors=args.num_neighbors,
-                            dropout=args.dropout,
-                            augment_eps=args.backbone_noise,
-                            use_ipmp=args.use_ipmp,
-                            n_points=args.n_points,
-                            side_chains=args.side_chains)
+
+    model = ProteinMPNN(node_features=args.hidden_dim,
+                        edge_features=args.hidden_dim,
+                        hidden_dim=args.hidden_dim,
+                        num_encoder_layers=args.num_encoder_layers,
+                        num_decoder_layers=args.num_decoder_layers,
+                        k_neighbors=args.num_neighbors,
+                        dropout=args.dropout,
+                        augment_eps=args.backbone_noise,
+                        use_ipmp=args.use_ipmp,
+                        n_points=args.n_points,
+                        side_chains=args.side_chains, 
+                        single_res_rec=args.single_res_rec)
 
     model.to(device)
 
@@ -149,7 +139,7 @@ def main(args):
             for _, batch in tqdm(enumerate(loader_train)):
                 start_batch = time.time()
                 X, S, mask, lengths, chain_M, residue_idx, mask_self, chain_encoding_all = featurize(batch, device, args.side_chains)
-                # print('***', X.shape)
+
                 elapsed_featurize = time.time() - start_batch
                 optimizer.zero_grad()
                 mask_for_loss = mask*chain_M
@@ -167,15 +157,10 @@ def main(args):
                     scaler.step(optimizer)
                     scaler.update()
                 else:
-                    # from torch.profiler import profile, record_function, ProfilerActivity
-                    # with profile(activities=[ProfilerActivity.CUDA], profile_memory=True, record_shapes=True) as prof:
                     log_probs = model(X, S, mask, chain_M, residue_idx, chain_encoding_all)
                     _, loss_av_smoothed = loss_smoothed(S, log_probs, mask_for_loss)
                     loss_av_smoothed.backward()
                     
-                    # print(prof.key_averages().table(sort_by="self_cpu_memory_usage", row_limit=10))
-
-
                     if args.gradient_norm > 0.0:
                         total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.gradient_norm)
 
@@ -270,7 +255,7 @@ if __name__ == "__main__":
     argparser.add_argument("--single_res_rec", type=bool, default=False, help="train for single-res recovery"
                                                                               "(assume nearby res are known)"
                                                                               "this is only useful for ThermoMPNN")
-    argparser.add_argument('--side_chains', type=int, default=-1, help='number atoms per residue to keep ("side-chain mode")')
+    argparser.add_argument('--side_chains', type=bool, default=False, help='include side chain atoms? default=False')
  
     args = argparser.parse_args()    
     main(args)   

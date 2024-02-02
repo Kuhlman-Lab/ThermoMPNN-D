@@ -60,12 +60,13 @@ def main(args):
                         edge_features=args.hidden_dim, 
                         hidden_dim=args.hidden_dim, 
                         num_encoder_layers=args.num_encoder_layers, 
-                        num_decoder_layers=args.num_encoder_layers, 
+                        num_decoder_layers=args.num_decoder_layers, 
                         k_neighbors=num_edges, 
                         dropout=0.0, 
                         augment_eps=0.0,
                         use_ipmp=args.use_ipmp,
-                        n_points=args.n_points)
+                        n_points=args.n_points, 
+                        single_res_rec=args.single_res_rec)
     model.load_state_dict(ckpt['model_state_dict'])
     model.to(device)
     model.eval()
@@ -100,7 +101,13 @@ def main(args):
                 for _, batch in tqdm(enumerate(loader_test)):
                     X, S, mask, lengths, chain_M, residue_idx, mask_self, chain_encoding_all = featurize(batch, device)
                     randn = torch.randn(chain_M.shape, device=device)
-                    sample_out = model.sample(X, randn, S, chain_M, chain_encoding_all, residue_idx, mask, temperature=args.temperature)
+                    
+                    # TODO implement sample for single residue decoding
+                    if args.single_res_rec:
+                        sample_out = model.sample_SRR(X, randn, S, chain_M, chain_encoding_all, residue_idx, mask, temperature=args.temperature)
+                    else:
+                        sample_out = model.sample(X, randn, S, chain_M, chain_encoding_all, residue_idx, mask, temperature=args.temperature)
+                                        
                     mask_for_loss = mask*chain_M
                     loss, _, _ = loss_nll(S, sample_out["log_probs"], mask_for_loss)
                     true_false = (S == sample_out['S']).float()
@@ -176,6 +183,7 @@ if __name__ == "__main__":
     argparser.add_argument("--temperature", type=float, default=1.0, help="temperature for sampling")
     argparser.add_argument("--rescut", type=float, default=3.5, help="PDB resolution cutoff")
     argparser.add_argument("--seed", type=int, default=None)
+    argparser.add_argument("--single_res_rec", type=bool, default=False, help="Enable single residue recovery mode (use fwd fxn for testing)")
  
     args = argparser.parse_args()    
     main(args)   
