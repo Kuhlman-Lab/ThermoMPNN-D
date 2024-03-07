@@ -1220,13 +1220,6 @@ class ProteinMPNN(nn.Module):
         self.hidden_dim = hidden_dim
         self.use_ipmp = use_ipmp
         
-        # Featurization layers
-        # if ca_only:
-        #     self.features = CA_ProteinFeatures(node_features, edge_features, top_k=k_neighbors, augment_eps=augment_eps)
-        #     self.W_v = nn.Linear(node_features, hidden_dim, bias=True)
-        # else:
-        #     self.features = ProteinFeatures(node_features, edge_features, top_k=k_neighbors, augment_eps=augment_eps)
-
         self.features = ProteinFeatures(node_features, edge_features, top_k=k_neighbors, augment_eps=augment_eps)
 
         self.W_e = nn.Linear(edge_features, hidden_dim, bias=True)
@@ -1305,8 +1298,8 @@ class ProteinMPNN(nn.Module):
         order_mask_backward = torch.ones_like(order_mask_backward)
 
         # apply padding/visible residue mask
-        # chain_applied = chain_M.unsqueeze(-1).repeat(1, 1, order_mask_backward.shape[2])
-        # order_mask_backward = order_mask_backward * chain_applied
+        chain_applied = chain_M.unsqueeze(-1).repeat(1, 1, order_mask_backward.shape[2])
+        order_mask_backward = order_mask_backward * chain_applied
         mask_attend = torch.gather(order_mask_backward, 2, E_idx).unsqueeze(-1)
 
         mask_1D = mask.view([mask.size(0), mask.size(1), 1, 1])

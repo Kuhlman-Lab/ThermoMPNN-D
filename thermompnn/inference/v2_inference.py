@@ -6,11 +6,12 @@ from tqdm import tqdm
 import numpy as np
 import pandas as pd
 
-from thermompnn.datasets.v2_datasets import MegaScaleDatasetv2, FireProtDatasetv2, ddgBenchDatasetv2, MegaScaleDatasetv2Pt, FireProtDatasetv2Confidence
+from thermompnn.datasets.v2_datasets import MegaScaleDatasetv2, FireProtDatasetv2, ddgBenchDatasetv2, tied_featurize_mut
 from thermompnn.inference.inference_utils import get_metrics_full
+from thermompnn.model.v2_model import batched_index_select
 
 
-def run_prediction_batched(name, model, dataset_name, dataset, results, keep=True):
+def run_prediction_batched(name, model, dataset_name, dataset, results, keep=True, zero_shot=False, cfg=None):
     """Standard inference for CSV/PDB based dataset in batched models"""
 
     device = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
@@ -27,15 +28,16 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
     
     print('Testing Model %s on dataset %s' % (name, dataset_name))
     preds, ddgs = [], []
+    if 'megascale' not in dataset_name:
+        batch_size = 1  # larger batches will fail due to different chain IDs - fix later
     
-    loader = DataLoader(dataset, collate_fn=lambda x: x, shuffle=False, num_workers=8, batch_size=None)
-    # loader = dataset
+    loader = DataLoader(dataset, collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.get('side_chains', False)), 
+                        shuffle=False, num_workers=cfg.training.get('num_workers', 8), batch_size=cfg.training.get('batch_size', 256))
+
     batches = []
     for i, batch in enumerate(tqdm(loader)):
-        # for conf model
+
         if batch is None:
-            # print('Skipping batch %s for lack of mutation' % str(i))
-            # preds += [-10000 for n in ]
             continue
         # X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, ddG_err = batch
         X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask = batch
@@ -54,7 +56,14 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
         atom_mask = torch.Tensor(atom_mask).to(device)
         # ddG_err = ddG_err.to(device)
 
-        pred, _ = model(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask)
+        if not zero_shot:
+            pred, _ = model(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask)
+        else:
+            pred = model(X, S, mask, chain_M, residue_idx, chain_encoding_all)[-2]
+            pred = zero_shot_convert(pred, mut_positions, mut_mutant_AAs, mut_wildtype_AAs)
+            # pred = zero_shot_convert(pred, mut_positions, mut_mutant_AAs) # absolute logits are less predictive than relative logits
+            if len(pred.shape) == 1:
+                pred = pred.unsqueeze(-1)
 
         # for conf model validation
         # mut_ddGs = torch.abs(pred - mut_ddGs)
@@ -70,16 +79,6 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
         ddgs += list(torch.squeeze(mut_ddGs, dim=-1).detach().cpu())
         batches += [i for p in range(len(pred))]
     
-        # quit()
-        
-        # TODO save batches as pt of values for independent confidence model
-        # diff = torch.abs(torch.squeeze(pred, dim=-1) - torch.squeeze(mut_ddGs, dim=-1))
-
-        # results = [X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, diff]
-        # fpath = os.path.join('/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/batched_mega_scale/conf_batches/%s' % 'SSYM-inv', f'batch_{i}.pt')
-        # fpath = os.path.join('/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/batched_mega_scale/conf_batches/%s' % 'fireprot-HF', f'batch_{i}.pt')
-        # torch.save(results, fpath)
-
     print('%s mutations evaluated' % (str(len(ddgs))))
     
     if keep:
@@ -109,49 +108,71 @@ def load_v2_dataset(cfg):
 
     ds_all = {
         'megascale': MegaScaleDatasetv2,  
-        # 'megascale': MegaScaleDatasetv2Pt,
         'fireprot': FireProtDatasetv2, 
-        # 'fireprot': FireProtDatasetv2Confidence,
         'ddgbench': ddgBenchDatasetv2
     }
-    # dataset format: dataset-split
-    parts = cfg.dataset.split('-')
-    prefix = parts[0]
-    split = '-'.join(parts[1:]) if len(parts) > 1 else 'dir'
+    dataset = cfg.data.dataset
+    split = cfg.data.splits[0]
+    # common splits: test, test_cdna2, homologue-free
 
-    if prefix == 'megascale' or prefix == 'fireprot':
-        ds = ds_all[prefix]
+    if dataset == 'megascale' and split == 'test_cdna2':
+        cfg.data_loc.megascale_csv = '/home/hdieckhaus/scripts/ThermoMPNN/data/cdna_mutate_everything/cdna2_test_ThermoMPNN.csv'
+
+    if dataset == 'megascale' or dataset == 'fireprot':
+        ds = ds_all[dataset]
         return ds(cfg, split)
+
     else:
         ds = ds_all['ddgbench']
         flip = False
 
-        if prefix == 's669':
+        if dataset == 's669':
             pdb_loc = os.path.join(cfg.data_loc.misc_data, 'S669/pdbs')
             csv_loc = os.path.join(cfg.data_loc.misc_data, 'S669/s669_clean_dir.csv')
 
-        elif prefix == 'ssym':
+        elif dataset == 'ssym':
             pdb_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/SSYM/pdbs')
             if split == 'dir':
                 csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/SSYM/ssym-5fold_clean_dir.csv')
             else:
                 csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/SSYM/ssym-5fold_clean_inv.csv')
 
-        elif prefix == 'p53':
+        elif dataset == 'p53':
             if split != 'dir':  # handle inverse mutations (w/Rosetta structures)
                 flip = True
             pdb_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/P53/pdbs')
             csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/P53/p53_clean.csv')
 
-        elif prefix == 'myoglobin':
+        elif dataset == 'myoglobin':
             if split != 'dir':
                 flip = True
             pdb_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/MYOGLOBIN/pdbs')
             csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/MYOGLOBIN/myoglobin_clean.csv')
 
-        elif prefix == 'ptmul':
-            pdb_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/PTMUL/pdbs')
-            # csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/PTMUL/ptmul-5fold-singles.csv')
-            csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/PTMUL/ptmul-5fold.csv')
+        elif dataset == 'ptmul':
+            if split != 'dir': # ptmul mutateeverything splits
+                print('loading ptmul with alternate splits/curation from MutateEverything paper')
+                pdb_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/PTMUL/pdbs')
+                csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/PTMUL/ptmul-5fold-mutateeverything_FINAL.csv')
+            else:    
+                pdb_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/PTMUL/pdbs')
+                csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/PTMUL/ptmul-5fold.csv')
 
         return ds(cfg, pdb_loc, csv_loc, flip=flip)
+
+
+def zero_shot_convert(preds, positions, mut_AAs, wt_AAs=None):
+    """Convert raw ProteinMPNN log-probs into ddG pseudo-values"""
+    ALPHABET = 'ACDEFGHIKLMNPQRSTVWYX'
+    # index positions 
+    preds = batched_index_select(preds, 1, positions)
+    # index mutAA indices
+    mut_logs = batched_index_select(preds, 2, mut_AAs)
+    mut_logs = torch.squeeze(torch.squeeze(mut_logs, -1), -1)
+    if wt_AAs is not None:
+        wt_logs = torch.squeeze(torch.squeeze(batched_index_select(preds, 2, wt_AAs), -1), -1)
+        mut_logs = wt_logs - mut_logs
+    else:
+        mut_logs = -1 * mut_logs
+
+    return mut_logs

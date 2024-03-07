@@ -18,7 +18,7 @@ def inference(cfg, args):
 
     # pre-initialization params
     device = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
-    ds_name = cfg.dataset
+    ds_name = cfg.data.dataset
     model_name = args.model.removesuffix('.ckpt')
     
     if cfg.version == 'v1':
@@ -33,12 +33,11 @@ def inference(cfg, args):
         else:
             results = run_prediction_default(model_name, model, ds_name, ds, [])
 
-
     elif cfg.version == 'v2':
         ds = load_v2_dataset(cfg)
         print('Loading model %s' % args.model)
         model = TransferModelPLv2.load_from_checkpoint(args.model, cfg=cfg, map_location=device).model
-        results = run_prediction_batched(model_name, model, ds_name, ds, [], args.keep_preds)
+        results = run_prediction_batched(model_name, model, ds_name, ds, [], args.keep_preds, cfg=cfg)
 
     elif cfg.version == 'siamese':
         ds = load_siamese_dataset(cfg)

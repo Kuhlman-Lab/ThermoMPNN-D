@@ -58,20 +58,24 @@ def main(args):
     LOAD_PARAM = {'batch_size': 1,
                   'shuffle': True,
                   'pin_memory':False,
-                  'num_workers': 4}
+                  'num_workers': 8}
 
-   
     if args.debug:
         args.num_examples_per_epoch = 50
         args.max_protein_length = 1000
         args.batch_size = 1000
 
     train, valid, test = build_training_clusters(params, args.debug)
-     
+    # TODO combine into one big training dataset
+    if args.full:
+        train = train | valid | test
+
     train_set = PDB_dataset(list(train.keys()), loader_pdb, train, params)
     train_loader = torch.utils.data.DataLoader(train_set, worker_init_fn=worker_init_fn, **LOAD_PARAM)
-    valid_set = PDB_dataset(list(valid.keys()), loader_pdb, valid, params)
-    valid_loader = torch.utils.data.DataLoader(valid_set, worker_init_fn=worker_init_fn, **LOAD_PARAM)
+    # TODO disable validation set 
+    if not args.full:
+        valid_set = PDB_dataset(list(valid.keys()), loader_pdb, valid, params)
+        valid_loader = torch.utils.data.DataLoader(valid_set, worker_init_fn=worker_init_fn, **LOAD_PARAM)
 
 
     model = ProteinMPNN(node_features=args.hidden_dim,
@@ -108,15 +112,23 @@ def main(args):
         p = queue.Queue(maxsize=3)
         for i in range(3):
             q.put_nowait(executor.submit(get_pdbs, train_loader, 1, args.max_protein_length, args.num_examples_per_epoch, args.side_chains))
-            p.put_nowait(executor.submit(get_pdbs, valid_loader, 1, args.max_protein_length, args.num_examples_per_epoch, args.side_chains))
+            # TODO disable validation dataset
+            if not args.full:
+                p.put_nowait(executor.submit(get_pdbs, valid_loader, 1, args.max_protein_length, args.num_examples_per_epoch, args.side_chains))
         pdb_dict_train = q.get().result()
-        pdb_dict_valid = p.get().result()
+        # TODO disable validation dataset
+        if not args.full:
+            pdb_dict_valid = p.get().result()
        
         dataset_train = StructureDataset(pdb_dict_train, truncate=None, max_length=args.max_protein_length)
-        dataset_valid = StructureDataset(pdb_dict_valid, truncate=None, max_length=args.max_protein_length)
+        # TODO disable validation dataset
+        if not args.full:
+            dataset_valid = StructureDataset(pdb_dict_valid, truncate=None, max_length=args.max_protein_length)
         
         loader_train = StructureLoader(dataset_train, batch_size=args.batch_size)
-        loader_valid = StructureLoader(dataset_valid, batch_size=args.batch_size)
+        # TODO disable validation dataset
+        if not args.full:
+            loader_valid = StructureLoader(dataset_valid, batch_size=args.batch_size)
         
         reload_c = 0 
         for e in range(args.num_epochs):
@@ -130,11 +142,15 @@ def main(args):
                     pdb_dict_train = q.get().result()
                     dataset_train = StructureDataset(pdb_dict_train, truncate=None, max_length=args.max_protein_length)
                     loader_train = StructureLoader(dataset_train, batch_size=args.batch_size)
-                    pdb_dict_valid = p.get().result()
-                    dataset_valid = StructureDataset(pdb_dict_valid, truncate=None, max_length=args.max_protein_length)
-                    loader_valid = StructureLoader(dataset_valid, batch_size=args.batch_size)
+                    # TODO disable val dataset
+                    if not args.full:
+                        pdb_dict_valid = p.get().result()
+                        dataset_valid = StructureDataset(pdb_dict_valid, truncate=None, max_length=args.max_protein_length)
+                        loader_valid = StructureLoader(dataset_valid, batch_size=args.batch_size)
                     q.put_nowait(executor.submit(get_pdbs, train_loader, 1, args.max_protein_length, args.num_examples_per_epoch, args.side_chains))
-                    p.put_nowait(executor.submit(get_pdbs, valid_loader, 1, args.max_protein_length, args.num_examples_per_epoch, args.side_chains))
+                    # TODO disable val dataset
+                    if not args.full:
+                        p.put_nowait(executor.submit(get_pdbs, valid_loader, 1, args.max_protein_length, args.num_examples_per_epoch, args.side_chains))
                 reload_c += 1
             for _, batch in tqdm(enumerate(loader_train)):
                 start_batch = time.time()
@@ -174,38 +190,52 @@ def main(args):
 
                 total_step += 1
 
-            model.eval()
-            with torch.no_grad():
-                validation_sum, validation_weights = 0., 0.
-                validation_acc = 0.
-                for _, batch in enumerate(loader_valid):
-                    X, S, mask, lengths, chain_M, residue_idx, mask_self, chain_encoding_all = featurize(batch, device, args.side_chains)
-                    log_probs = model(X, S, mask, chain_M, residue_idx, chain_encoding_all)
-                    mask_for_loss = mask*chain_M
-                    loss, loss_av, true_false = loss_nll(S, log_probs, mask_for_loss)
-                    
-                    validation_sum += torch.sum(loss * mask_for_loss).cpu().data.numpy()
-                    validation_acc += torch.sum(true_false * mask_for_loss).cpu().data.numpy()
-                    validation_weights += torch.sum(mask_for_loss).cpu().data.numpy()
+            # TODO disable val dataset
+            if not args.full:
+                model.eval()
+                with torch.no_grad():
+                    validation_sum, validation_weights = 0., 0.
+                    validation_acc = 0.
+                    for _, batch in enumerate(loader_valid):
+                        X, S, mask, lengths, chain_M, residue_idx, mask_self, chain_encoding_all = featurize(batch, device, args.side_chains)
+                        log_probs = model(X, S, mask, chain_M, residue_idx, chain_encoding_all)
+                        mask_for_loss = mask*chain_M
+                        loss, loss_av, true_false = loss_nll(S, log_probs, mask_for_loss)
+                        
+                        validation_sum += torch.sum(loss * mask_for_loss).cpu().data.numpy()
+                        validation_acc += torch.sum(true_false * mask_for_loss).cpu().data.numpy()
+                        validation_weights += torch.sum(mask_for_loss).cpu().data.numpy()
             
             train_loss = train_sum / train_weights
             train_accuracy = train_acc / train_weights
             train_perplexity = np.exp(train_loss)
-            validation_loss = validation_sum / validation_weights
-            validation_accuracy = validation_acc / validation_weights
-            validation_perplexity = np.exp(validation_loss)
+            # TODO disable val dataset
+            if not args.full:
+                validation_loss = validation_sum / validation_weights
+                validation_accuracy = validation_acc / validation_weights
+                validation_perplexity = np.exp(validation_loss)
             
-            train_perplexity_ = np.format_float_positional(np.float32(train_perplexity), unique=False, precision=3)     
-            validation_perplexity_ = np.format_float_positional(np.float32(validation_perplexity), unique=False, precision=3)
+            train_perplexity_ = np.format_float_positional(np.float32(train_perplexity), unique=False, precision=3)    
             train_accuracy_ = np.format_float_positional(np.float32(train_accuracy), unique=False, precision=3)
-            validation_accuracy_ = np.format_float_positional(np.float32(validation_accuracy), unique=False, precision=3)
+
+            # TODO disable val dataset 
+            if not args.full:
+                validation_perplexity_ = np.format_float_positional(np.float32(validation_perplexity), unique=False, precision=3)
+                validation_accuracy_ = np.format_float_positional(np.float32(validation_accuracy), unique=False, precision=3)
     
             t1 = time.time()
             dt = np.format_float_positional(np.float32(t1-t0), unique=False, precision=1) 
-            with open(logfile, 'a') as f:
-                f.write(f'epoch: {e+1}, step: {total_step}, time: {dt}, train: {train_perplexity_}, valid: {validation_perplexity_}, train_acc: {train_accuracy_}, valid_acc: {validation_accuracy_}\n')
-            print(f'epoch: {e+1}, step: {total_step}, time: {dt}, train: {train_perplexity_}, valid: {validation_perplexity_}, train_acc: {train_accuracy_}, valid_acc: {validation_accuracy_}')
-            
+            # TODO disable val dataset
+            if not args.full:
+                with open(logfile, 'a') as f:
+                    f.write(f'epoch: {e+1}, step: {total_step}, time: {dt}, train: {train_perplexity_}, valid: {validation_perplexity_}, train_acc: {train_accuracy_}, valid_acc: {validation_accuracy_}\n')
+                print(f'epoch: {e+1}, step: {total_step}, time: {dt}, train: {train_perplexity_}, valid: {validation_perplexity_}, train_acc: {train_accuracy_}, valid_acc: {validation_accuracy_}')
+             
+            else:
+                with open(logfile, 'a') as f:
+                    f.write(f'epoch: {e+1}, step: {total_step}, time: {dt}, train: {train_perplexity_}, train_acc: {train_accuracy_}\n')
+                print(f'epoch: {e+1}, step: {total_step}, time: {dt}, train: {train_perplexity_}, train_acc: {train_accuracy_}')
+                
             checkpoint_filename_last = base_folder+'model_weights/epoch_last.pt'.format(e+1, total_step)
             torch.save({
                         'epoch': e+1,
@@ -256,6 +286,7 @@ if __name__ == "__main__":
                                                                               "(assume nearby res are known)"
                                                                               "this is only useful for ThermoMPNN")
     argparser.add_argument('--side_chains', type=bool, default=False, help='include side chain atoms? default=False')
- 
+    argparser.add_argument('--full', type=bool, default=False, help='train on FULL dataset (train+val+test set) to replicate literature results')
+
     args = argparser.parse_args()    
     main(args)   

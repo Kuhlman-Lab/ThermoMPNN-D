@@ -1,6 +1,6 @@
 
 from thermompnn.datasets.v1_datasets import MegaScaleDataset, FireProtDataset, ComboDataset
-from thermompnn.datasets.v2_datasets import MegaScaleDatasetv2, MegaScaleDatasetv2Pt, MegaScaleDatasetv2Aug, MegaScaleDatasetv2Rebatched
+from thermompnn.datasets.v2_datasets import MegaScaleDatasetv2
 from thermompnn.datasets.siamese_datasets import MegaScaleDatasetSiamese, MegaScaleDatasetSiamesePt
 
 
@@ -31,22 +31,10 @@ def get_v1_dataset(cfg):
 
 
 def get_v2_dataset(cfg):
-    # valid_ds = ['megascale', 'megascale_pt', 'megascale-de0']
-    query = cfg.dataset.lower()
+    query = cfg.data.dataset.lower()
+    splits = cfg.data.splits
     assert query.startswith('megascale')
-    if query.endswith('pt'): # contains mutant structures
-        return MegaScaleDatasetv2Pt(cfg, 'train'), MegaScaleDatasetv2Pt(cfg, 'val')
-    elif query.endswith('rebatched'): # contains mutant structures
-        print('loading rebatched dataset with ptmul-filtered training dataset')
-        return MegaScaleDatasetv2Rebatched(cfg, 'train_ptmul'), MegaScaleDatasetv2Rebatched(cfg, 'val')
-    else: # un-augmented or lazy data augmentation
-        if query.startswith('megascale-de'): # special case here - deep ensemble training
-            train, val = f'de_train_{query[-1]}', f'de_val_{query[-1]}'
-            # grab megascale dataset object
-            ds = MegaScaleDatasetv2
-            return ds(cfg, train), ds(cfg, val)
-
-        return MegaScaleDatasetv2(cfg, 'train'), MegaScaleDatasetv2(cfg, 'val')
+    return MegaScaleDatasetv2(cfg, splits[0]), MegaScaleDatasetv2(cfg, splits[1])
 
 
 def get_siamese_dataset(cfg):

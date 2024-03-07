@@ -33,7 +33,7 @@ def main(args):
     ckpt_path = args.ckpt_path
     ckpt = torch.load(ckpt_path, map_location=torch.device('cpu'))
     num_edges = ckpt['num_edges']
-    
+
     data_path = args.path_for_training_data
     params = {
         "LIST"    : f"{data_path}/list.csv", 
@@ -45,11 +45,10 @@ def main(args):
         "HOMO"    : 0.70 #min seq.id. to detect homo chains
     }
 
-
     LOAD_PARAM = {'batch_size': 1,
                   'shuffle': True,
-                  'pin_memory':False,
-                  'num_workers': 4}
+                  'pin_memory': False,
+                  'num_workers': 8}
 
     train, valid, test = build_training_clusters(params, False)
 
@@ -66,7 +65,8 @@ def main(args):
                         augment_eps=0.0,
                         use_ipmp=args.use_ipmp,
                         n_points=args.n_points, 
-                        single_res_rec=args.single_res_rec)
+                        single_res_rec=args.single_res_rec, 
+                        side_chains=args.side_chains)
     model.load_state_dict(ckpt['model_state_dict'])
     model.to(device)
     model.eval()
@@ -75,7 +75,7 @@ def main(args):
     with ProcessPoolExecutor(max_workers=12) as executor:
         q = queue.Queue(maxsize=3)
         for i in range(3):
-            q.put_nowait(executor.submit(get_pdbs, test_loader, 1, args.max_protein_length, args.num_examples_per_epoch))
+            q.put_nowait(executor.submit(get_pdbs, test_loader, 1, args.max_protein_length, args.num_examples_per_epoch, args.side_chains))
         pdb_dict_test = q.get().result()
        
         dataset_test = StructureDataset(pdb_dict_test, truncate=None, max_length=args.max_protein_length)        
@@ -91,7 +91,7 @@ def main(args):
                     pdb_dict_test = q.get().result()
                     dataset_test = StructureDataset(pdb_dict_test, truncate=None, max_length=args.max_protein_length)
                     loader_test = StructureLoader(dataset_test, batch_size=args.batch_size)
-                    q.put_nowait(executor.submit(get_pdbs, test_loader, 1, args.max_protein_length, args.num_examples_per_epoch))
+                    q.put_nowait(executor.submit(get_pdbs, test_loader, 1, args.max_protein_length, args.num_examples_per_epoch, args.side_chains))
                 reload_c += 1
             
             with torch.no_grad():
@@ -99,16 +99,17 @@ def main(args):
                 test_acc = {'all': [0., 0], 'core': [0., 0], 'surface': [0., 0]}
                 aatype_acc = {aatype: [0., 0] for aatype in aatype_accuracy}
                 for _, batch in tqdm(enumerate(loader_test)):
-                    X, S, mask, lengths, chain_M, residue_idx, mask_self, chain_encoding_all = featurize(batch, device)
+                    X, S, mask, lengths, chain_M, residue_idx, mask_self, chain_encoding_all = featurize(batch, device, args.side_chains)
                     randn = torch.randn(chain_M.shape, device=device)
-                    
-                    # TODO implement sample for single residue decoding
+
+                    # separate (one-shot) sample fxn for single residue decoding
                     if args.single_res_rec:
                         sample_out = model.sample_SRR(X, randn, S, chain_M, chain_encoding_all, residue_idx, mask, temperature=args.temperature)
                     else:
                         sample_out = model.sample(X, randn, S, chain_M, chain_encoding_all, residue_idx, mask, temperature=args.temperature)
-                                        
+   
                     mask_for_loss = mask*chain_M
+
                     loss, _, _ = loss_nll(S, sample_out["log_probs"], mask_for_loss)
                     true_false = (S == sample_out['S']).float()
                     
@@ -120,6 +121,8 @@ def main(args):
                     test_acc['all'][1] += torch.sum(mask_for_loss).cpu().data.numpy()
 
                     # Impute CB for all residues
+                    X = torch.nan_to_num(X, nan=0.0)
+                    
                     b = X[..., 1, :] - X[..., 0, :]
                     c = X[..., 2, :] - X[..., 1, :]
                     a = torch.cross(b, c, dim=-1)
@@ -184,6 +187,8 @@ if __name__ == "__main__":
     argparser.add_argument("--rescut", type=float, default=3.5, help="PDB resolution cutoff")
     argparser.add_argument("--seed", type=int, default=None)
     argparser.add_argument("--single_res_rec", type=bool, default=False, help="Enable single residue recovery mode (use fwd fxn for testing)")
- 
+    argparser.add_argument("--side_chains", type=bool, default=False, help="Enable side chain edge features")
+    argparser.add_argument("--logits", type=str, default='logits.pt', help='logits file to save')
+
     args = argparser.parse_args()    
     main(args)   

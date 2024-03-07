@@ -1,34 +1,29 @@
 # project: ThermoMPNN_v2
-# name: EXP2.8.base.eps0.1
+# name: EXP2.8.drop0p1
 
 version: v2 # options: (v1, v2, siamese)
 
-dataset: megascale-test
-# dataset: fireprot-homologue-free
-# dataset: ssym-dir
-# dataset: ssym-inv
-
 data:
-  mut_types: [single]
-  side_chains: true
-  side_chain_rbfs: 16
-  side_chain_topk: 30
-  side_chain_augment_eps: 0.0
-  thru: true
+  dataset: ptmul
+  splits: [alt]
+  mut_types: [double, higher]
+  side_chains: False
 
 training:
-  num_workers: 16
+  num_workers: 12
   learn_rate: 0.0001
   epochs: 100
   lr_schedule: true
-  batch_size: 10000
+  batch_size: 1
 
 model:
   hidden_dims: [64, 32]
-  subtract_mut: true
-  mutant_embedding: false
-  single_target: false
+  subtract_mut: false
+  mutant_embedding: true
+  single_target: true
   num_final_layers: 2
   freeze_weights: true
   load_pretrained: true
   lightattn: true
+  aggregation: max
+  # dropout: 0.1

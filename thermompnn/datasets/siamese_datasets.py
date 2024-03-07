@@ -9,7 +9,31 @@ from copy import deepcopy
 
 from thermompnn.protein_mpnn_utils import alt_parse_PDB, parse_PDB
 from thermompnn.datasets.dataset_utils import Mutation, seq1_index_to_seq2_index
-from thermompnn.datasets.v2_datasets import tied_featurize_mut, batchify
+from thermompnn.datasets.v2_datasets import tied_featurize_mut
+
+
+def batchify(lengths, batch_size=10000):
+    """Batchify a set of sequence lengths into padded batches of max size batch_size"""
+    # adapted from proteinmpnn.utils.StructureLoader
+
+    # argsort returns indexes, not sorted list
+    sorted_ix = np.argsort(lengths)
+    # Cluster into batches of similar sizes
+    clusters, batch = [], []
+    batch_max = 0
+    for ix in sorted_ix:
+        size = lengths[ix]
+        if size * (len(batch) + 1) <= batch_size:  # make sure new size (B x L_max) is under batch_size
+            batch.append(ix)
+            batch_max = size
+        else:
+            clusters.append(np.array(batch))
+            batch, batch_max = [ix], size
+        
+    if len(batch) > 0:
+        clusters.append(np.array(batch))
+    # clusters is a list of (lists of indexes which each make up a batch with length <= self.batch_size)
+    return clusters
 
 
 def adj_sequence(pdb, wt, mut, idx):

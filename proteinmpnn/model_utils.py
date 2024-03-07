@@ -134,7 +134,7 @@ def featurize(batch, device, side_chains=False):
         mask = np.isfinite(np.sum(X, (2, 3))).astype(np.float32)
     else:
         # need to specify ONLY backbone atoms or else no residue will exist (except TRP)
-        mask = np.isfinite(np.sum(X[:, :, 0:4, :], (2, 3))).astype(np.float32)
+        mask = np.isfinite(np.sum(X[:, :, :4, :], (2, 3))).astype(np.float32)
 
     # removed so that mask_per_atom can be gathered in forward fxn instead
     # X[isnan] = 0.
@@ -538,11 +538,12 @@ class ProteinFeatures(nn.Module):
         self.num_positional_embeddings = num_positional_embeddings
         self.side_chains = side_chains
 
-        num_atom_combos = 25
+        
         if self.side_chains:
             print('Side chain distances enabled!')
             num_atom_combos = 5 * 14
         else:
+            num_atom_combos = 25
             print('Using only backbone distances!')
         
         self.embeddings = PositionalEncodings(num_positional_embeddings)
@@ -638,7 +639,7 @@ class ProteinFeatures(nn.Module):
         E = self.edge_embedding(E)
         E = self.norm_edges(E)
         return E, E_idx, X
-
+        
 
 class ProteinMPNN(nn.Module):
     def __init__(self, num_letters=21, node_features=128, edge_features=128,
@@ -657,7 +658,6 @@ class ProteinMPNN(nn.Module):
         if self.single_res_rec:
             print('Running single residue recovery ProteinMPNN!')
 
-        # TODO make second ProteinFeatures for side chains
         self.features = ProteinFeatures(node_features, edge_features, top_k=k_neighbors, augment_eps=augment_eps, side_chains=False)
 
         self.W_e = nn.Linear(edge_features, hidden_dim, bias=True)
@@ -678,6 +678,7 @@ class ProteinMPNN(nn.Module):
 
         # If side chains are enabled, add them in right before the decoder
         if self.side_chains:
+            print('Side chains enabled!')
             self.sca_features = ProteinFeatures(node_features, edge_features, top_k=k_neighbors, augment_eps=augment_eps, side_chains=True)
             self.sca_W_e = nn.Linear(edge_features, hidden_dim, bias=True)
 
@@ -715,7 +716,6 @@ class ProteinMPNN(nn.Module):
             X = torch.nan_to_num(X, nan=0.0)
             E, E_idx, X = self.features(X, mask, residue_idx, chain_encoding_all)
         else:
-            
             mask_per_atom = (~torch.isnan(X)[:, :, :, 0]).long()  # different side chain atoms exist for different residues
             # mask_per_atom is shape [B, L_max, 14] - use this for RBF masking
             X = torch.nan_to_num(X, nan=0.0)
@@ -723,6 +723,7 @@ class ProteinMPNN(nn.Module):
             # only pass backbone to main ProteinFeatures
             E, E_idx, _ = self.features(X[..., :4, :], mask, residue_idx, chain_encoding_all)
             
+            # TODO henry move this to after mask_bw is defined - use this to mask instead
             # pass full side chain set to separate SideChainFeatures for use in DECODER ONLY
             E_sc, E_idx_sc, X = self.sca_features(X, mask, residue_idx, chain_encoding_all, mask_per_atom)
             h_E_sc = self.sca_W_e(E_sc) # project down to hidden dim
@@ -772,6 +773,9 @@ class ProteinMPNN(nn.Module):
         X_neighbors = X_neighbors.view((*E_idx.shape, -1, 3))
 
         h_EXV_encoder_fw = mask_fw * h_EXV_encoder
+
+        # TODO henry rewrite SCA edge generation use mask_bw for filtering SC distances
+
         for layer in self.decoder_layers:
             h_ESV = cat_neighbors_nodes(h_V, h_ES, E_idx)
             h_ESV = mask_bw * h_ESV + h_EXV_encoder_fw
@@ -791,10 +795,12 @@ class ProteinMPNN(nn.Module):
     def sample(self, X, randn, S_true, chain_mask, chain_encoding_all, residue_idx, mask=None, temperature=1.0):
         device = X.device
         # Prepare node and edge embeddings
-        if not self.side_chains:
-            X = torch.nan_to_num(X, nan=0.0)            
-            
+        X = torch.nan_to_num(X, nan=0.0)
         E, E_idx, X = self.features(X, mask, residue_idx, chain_encoding_all)
+
+        # NOTE: for running legacy models w/o IPMP support
+        # E, E_idx = self.features(X, mask, residue_idx, chain_encoding_all)
+
         h_V = torch.zeros((E.shape[0], E.shape[1], E.shape[-1]), device=device)
         h_E = self.W_e(E)
 
@@ -813,6 +819,10 @@ class ProteinMPNN(nn.Module):
         mask_size = E_idx.shape[1]
         permutation_matrix_reverse = torch.nn.functional.one_hot(decoding_order, num_classes=mask_size).float()
         order_mask_backward = torch.einsum('ij, biq, bjp->bqp',(1-torch.triu(torch.ones(mask_size,mask_size, device=device))), permutation_matrix_reverse, permutation_matrix_reverse)
+
+        # SRR decoding mask (all but current residue are visible)       
+        # order_mask_backward = torch.ones_like(order_mask_backward, device=device) - torch.eye(order_mask_backward.shape[-1], device=device).unsqueeze(0).repeat(order_mask_backward.shape[0], 1, 1)
+
         mask_attend = torch.gather(order_mask_backward, 2, E_idx).unsqueeze(-1)
         mask_1D = mask.view([mask.size(0), mask.size(1), 1, 1])
         mask_bw = mask_1D * mask_attend
@@ -833,9 +843,31 @@ class ProteinMPNN(nn.Module):
 
         h_EX_encoder = cat_neighbors_nodes(torch.zeros_like(h_S), h_E, E_idx)
         h_EXV_encoder = cat_neighbors_nodes(h_V, h_EX_encoder, E_idx)
+        # TODO henry update mask_fw to be fully decoded except for target residue
+
         h_EXV_encoder_fw = mask_fw * h_EXV_encoder
         for t_ in range(N_nodes):
+            
             t = decoding_order[:,t_] #[B]
+            
+            # set up mask_fw and mask_bw and reset h_EXV_encoder_fw for every position
+            # mask out t_ position and padded regions ONLY
+
+            # SRR decoding mask (all but current residue are visible) 
+            # order_mask_backward = torch.ones_list(order_mask_backward, device=device)
+            # order_mask_backward[..., ]      
+            # order_mask_backward = torch.ones_like(order_mask_backward, device=device) - torch.eye(order_mask_backward.shape[-1], device=device).unsqueeze(0).repeat(order_mask_backward.shape[0], 1, 1)
+
+            # mask_attend = torch.gather(order_mask_backward, 2, E_idx).unsqueeze(-1)
+            # mask_1D = mask.view([mask.size(0), mask.size(1), 1, 1])
+            # mask_bw = mask_1D * mask_attend
+            # mask_fw = mask_1D * (1. - mask_attend)
+            
+            # mask_fw: 1 = not yet decoded; 0 = decoded already
+            # mask_bw: 1 = decoded
+            # mask_fw = torch.ones_like(mask_fw) * mask_1D # remove padded regions
+            # mask_
+            
             chain_mask_gathered = torch.gather(chain_mask, 1, t[:,None]) #[B]
             mask_gathered = torch.gather(mask, 1, t[:,None]) #[B]
             if (mask_gathered==0).all(): #for padded or missing regions only
@@ -854,7 +886,11 @@ class ProteinMPNN(nn.Module):
                     # Updated relational features for future states
                     h_ESV_decoder_t = cat_neighbors_nodes(h_V_stack[l], h_ES_t, E_idx_t)
                     h_V_t = torch.gather(h_V_stack[l], 1, t[:,None,None].repeat(1,1,h_V_stack[l].shape[-1]))
+                    # TODO henry update mask_bw to be fully unmasked before inference
+                    # mask_bw: 1 = already decoded; 0 = not decoded yet
+                    # print(torch.gather(mask_bw, 1, t[:,None,None,None].repeat(1,1,mask_bw.shape[-2], mask_bw.shape[-1])))
                     h_ESV_t = torch.gather(mask_bw, 1, t[:,None,None,None].repeat(1,1,mask_bw.shape[-2], mask_bw.shape[-1])) * h_ESV_decoder_t + h_EXV_encoder_t
+
                     if not self.use_ipmp:
                         h_V_stack[l+1].scatter_(1, t[:,None,None].repeat(1,1,h_V.shape[-1]), layer(h_V_t, h_ESV_t, mask_V=mask_t))
                     else:
@@ -891,12 +927,16 @@ class ProteinMPNN(nn.Module):
             X = torch.nan_to_num(X, nan=0.0)
             E, E_idx, X = self.features(X, mask, residue_idx, chain_encoding_all)
         else:
-            raise ValueError("Not re-implemented yet!")
-            mask_per_atom = (~torch.isnan(X)[:, :, :, 0]).long()  # different num. of side chains exist for different residues
+            mask_per_atom = (~torch.isnan(X)[:, :, :, 0]).long()  # different side chain atoms exist for different residues
             # mask_per_atom is shape [B, L_max, 14] - use this for RBF masking
             X = torch.nan_to_num(X, nan=0.0)
-            # TODO only pass backbone to main ProteinFeatures
-            E, E_idx, X = self.features(X, mask, residue_idx, chain_encoding_all, mask_per_atom)
+            
+            # only pass backbone to main ProteinFeatures
+            E, E_idx, _ = self.features(X[..., :4, :], mask, residue_idx, chain_encoding_all)
+            
+            # pass full side chain set to separate SideChainFeatures for use in DECODER ONLY
+            E_sc, E_idx_sc, X = self.sca_features(X, mask, residue_idx, chain_encoding_all, mask_per_atom)
+            h_E_sc = self.sca_W_e(E_sc) # project down to hidden dim
 
         h_V = torch.zeros((E.shape[0], E.shape[1], E.shape[-1]), device=E.device)
         h_E = self.W_e(E)
@@ -945,10 +985,14 @@ class ProteinMPNN(nn.Module):
         for layer in self.decoder_layers:
             h_ESV = cat_neighbors_nodes(h_V, h_ES, E_idx)
             h_ESV = mask_bw * h_ESV + h_EXV_encoder_fw
-            if not self.use_ipmp:
-                h_V = torch.utils.checkpoint.checkpoint(layer, h_V, h_ESV, mask)
+
+            if self.side_chains:
+                h_V = torch.utils.checkpoint.checkpoint(layer, h_V, h_ESV, mask, None, h_E_sc)
             else:
-                h_V = torch.utils.checkpoint.checkpoint(layer, h_V, h_ESV, E_idx, X_neighbors, mask)
+                if not self.use_ipmp:
+                    h_V = torch.utils.checkpoint.checkpoint(layer, h_V, h_ESV, mask)
+                else:
+                    h_V = torch.utils.checkpoint.checkpoint(layer, h_V, h_ESV, E_idx, X_neighbors, mask)
 
         if temperature <= 0.0:
             logits = self.W_out(h_V)
@@ -973,7 +1017,7 @@ class ProteinMPNN(nn.Module):
         log_probs = (log_probs * chain_mask[:, :, None,].repeat(1, 1, log_probs.shape[-1]).float())
 
         # intended shapes: [B, L]; [B, L, 21]; [B, L]; [B, L, 21]
-        output_dict = {"S": S, "probs": probs, "decoding_order": decoding_order, "log_probs": log_probs}
+        output_dict = {"S": S, "probs": probs, "decoding_order": decoding_order, "log_probs": log_probs, "logits": logits}
         return output_dict
 
 

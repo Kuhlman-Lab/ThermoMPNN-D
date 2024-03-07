@@ -8,6 +8,7 @@ from tqdm import tqdm
 from copy import deepcopy
 from itertools import permutations
 import itertools
+from sklearn.preprocessing import minmax_scale
 
 from thermompnn.protein_mpnn_utils import alt_parse_PDB, parse_PDB
 from thermompnn.datasets.dataset_utils import Mutation, seq1_index_to_seq2_index, ALPHABET
@@ -265,10 +266,13 @@ def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict
     isnan = np.isnan(X)
 
     # need to protect against "missing" side chains, else whole sequence will be flagged
-    mask = np.isfinite(np.sum(X[..., :4, :], (2, 3))).astype(np.float32)
-    # mask = np.isfinite(np.sum(X, (2, 3))).astype(np.float32)
+    if not side_chains:
+        mask = np.isfinite(np.sum(X, (2, 3))).astype(np.float32)
+    else:
+        mask = np.isfinite(np.sum(X[..., :4, :], (2, 3))).astype(np.float32)
 
-    X[isnan] = 0.
+    if not side_chains:
+        X[isnan] = 0.
 
     # Conversion
     pssm_coef_all = torch.from_numpy(pssm_coef_all).to(dtype=torch.float32, device=device)
@@ -303,35 +307,209 @@ def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict
     MUT_MUT_AA = torch.from_numpy(MUT_MUT_AA).to(dtype=torch.long, device=device)
     MUT_DDG = torch.from_numpy(MUT_DDG).to(dtype=torch.float32, device=device)
 
-    return X_out, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, MUT_POS, MUT_WT_AA, MUT_MUT_AA, MUT_DDG, np.prod(isnan, axis=-1)
+    atom_mask = torch.from_numpy(np.prod(isnan, axis=-1)).to(dtype=torch.long, device=device)
+
+    return X_out, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, MUT_POS, MUT_WT_AA, MUT_MUT_AA, MUT_DDG, atom_mask
 
 
-def batchify(lengths, batch_size=10000):
-    """Batchify a set of sequence lengths into padded batches of max size batch_size"""
-    # adapted from proteinmpnn.utils.StructureLoader
+class ddgBenchDatasetv2(torch.utils.data.Dataset):
 
-    # argsort returns indexes, not sorted list
-    sorted_ix = np.argsort(lengths)
-    # Cluster into batches of similar sizes
-    clusters, batch = [], []
-    batch_max = 0
-    for ix in sorted_ix:
-        size = lengths[ix]
-        if size * (len(batch) + 1) <= batch_size:  # make sure new size (B x L_max) is under batch_size
-            batch.append(ix)
-            batch_max = size
-        else:
-            clusters.append(np.array(batch))
-            batch, batch_max = [ix], size
+    def __init__(self, cfg, pdb_dir, csv_fname, flip=False):
+
+        self.cfg = cfg
+        self.pdb_dir = pdb_dir
+        self.rev = flip  # "reverse" mutation testing
+        print('Reverse mutations: %s' % str(self.rev))
+        df = pd.read_csv(csv_fname)
+        self.df = df
+
+        self.wt_seqs = {}
+        self.mut_rows = {}
+        self.wt_names = df.PDB.unique()
+                 
+        self.pdb_data = {}
+        self.side_chains = self.cfg.data.get('side_chains', False)
+        # parse all PDBs first - treat each row as its own PDB
+        for i, row in self.df.iterrows():
+            fname = row.PDB[:-1]
+            pdb_file = os.path.join(self.pdb_dir, f"{fname}.pdb")
+            chain = [row.PDB[-1]]
+            pdb = alt_parse_PDB(pdb_file, input_chain_list=chain, side_chains=self.side_chains)
+            self.pdb_data[i] = pdb[0]
+
+    def __len__(self):
+        return len(self.pdb_data)
+
+    def __getitem__(self, index):
+        """Batch retrieval fxn - do each row as its own item, for simplicity"""
+
+        row = self.df.iloc[index]
+        pdb_CANONICAL = self.pdb_data[index]
         
-    if len(batch) > 0:
-        clusters.append(np.array(batch))
-    # clusters is a list of (lists of indexes which each make up a batch with length <= self.batch_size)
-    return clusters
+        if 'MUTS' in self.df.columns:
+            mut_info = row.MUTS
+            # try:
+            #     mut_info = mut_info.split(';')[9]
+            # except IndexError:
+            #     mut_info = np.nan
+
+        else:
+            mut_info = row.MUT
+
+        wt_list, mut_list, idx_list = [], [], []
+        if mut_info is np.nan:  # to skip missing mutations for additive model
+            return
+
+        if ('ptmul' in self.cfg.data.dataset) and ('double' not in self.cfg.data.mut_types):
+            if len(mut_info.split(';')) < 3: # skip double mutants if missing
+                return
+        if ('ptmul' in self.cfg.data.dataset) and ('higher' not in self.cfg.data.mut_types):
+            if len(mut_info.split(';')) > 2: # skip higher order mutants if missing
+                return
+
+        if not self.rev:
+            for mt in mut_info.split(';'):  # handle multiple mutations like for megascale
+                
+                wtAA, mutAA = mt[0], mt[-1]
+                ddG = float(row.DDG) * -1
+                
+                pdb = deepcopy(pdb_CANONICAL)      
+                pdb_idx = self._get_pdb_idx(mt, pdb_CANONICAL)
+                assert pdb['seq'][pdb_idx] == wtAA
+                
+                wt_list.append(wtAA)
+                mut_list.append(mutAA)
+                idx_list.append(pdb_idx)
+                pdb['mutation'] = Mutation(idx_list, wt_list, mut_list, ddG, row.PDB[:-1])
+                
+        else:  # reverse mutations - retrieve Rosetta/modeled structures
+            fname = row.PDB[:-1]
+            chain = row.PDB[-1]
+            old_idx = int(mut_info[1:-1])
+            # print(f"{fname}{chain}_{wtAA}{old_idx}{mutAA}_relaxed.pdb")
+            pdb_file = os.path.join(self.pdb_dir, f"{fname}{chain}_{wtAA}{old_idx}{mutAA}_relaxed.pdb")
+            pdb = alt_parse_PDB(pdb_file, input_chain_list=chain, side_chains=self.side_chains)[0]
+            pdb['mutation'] = Mutation([pdb_idx], [mutAA], [wtAA], ddG * -1, row.PDB[:-1])
+        
+        # if needed, update wt seq to match passed mutations
+        seq_keys = [k for k in pdb.keys() if k.startswith('seq')]
+        if len(seq_keys) > 2:
+            raise ValueError("Maximum of 2 seq fields expected in PDB, %s seq fields found instead" % str(len(seq_keys)))
+        for sk in seq_keys:
+            tmp = [p for p in pdb[sk]]
+            tmp[pdb_idx] = wtAA
+            pdb[sk] = ''.join(tmp)   
+
+        tmp = deepcopy(pdb)  # this is hacky but it is needed or else it overwrites all PDBs with the last data point
+        return tmp
+
+    def _get_pdb_idx(self, mut_info, pdb):
+        """Helper function to fix any alignment issues with messy experimental data"""
+        wtAA = mut_info[0]
+        try:
+            pos = mut_info[1:-1]
+            pdb_idx = pdb['resn_list'].index(pos)
+            
+        except ValueError:  # skip positions with insertion codes for now - hard to parse
+            raise ValueError('NO PDB IDX FOUND - insertion code')
+        try:
+            assert pdb['seq'][pdb_idx] == wtAA
+        except AssertionError:  # contingency for mis-alignments
+            # if gaps are present, add these to idx (+10 to get any around the mutation site, very much an ugly hack)
+            if 'S669' in self.pdb_dir:
+                gaps = [g for g in pdb['seq'] if g == '-']
+            elif ('PTMUL' in self.pdb_dir) and ('1YCC' in pdb['name']) and ('T69E' == mut_info):  # bad case w/negative bits
+                gaps = ['-']
+            elif ('PTMUL' in self.pdb_dir) and ('1QJP' in pdb['name'] and int(mut_info[1:-1]) > 150):
+                gaps = ['-'] * 34
+
+            elif ('PTMUL' in self.pdb_dir) and ('2WSY' in pdb['name']):  # this protein does not behave well
+                gaps = ['-'] * 15
+
+                if int(mut_info[1:-1]) == 232:
+                    gaps = ['-'] * 29
+                if int(mut_info[1:-1]) == 175:
+                    gaps = ['-'] * 9
+                if int(mut_info[1:-1]) == 209:
+                    gaps = ['-'] * 28
+                    
+            else:
+                gaps = [g for g in pdb['seq'][:pdb_idx + 10] if g == '-']                
+
+            if len(gaps) > 0:
+                pdb_idx += len(gaps)
+            else:
+                pdb_idx += 1
+
+            if pdb_idx is None:
+                raise ValueError('NO PDB IDX FOUND - bad alignment')
+            assert pdb['seq'][pdb_idx] == wtAA
+        return pdb_idx
+
+
+class FireProtDatasetv2(torch.utils.data.Dataset):
+
+    def __init__(self, cfg, split):
+
+        self.cfg = cfg
+        self.split = split
+
+        filename = self.cfg.data_loc.fireprot_csv
+
+        df = pd.read_csv(filename).dropna(subset=['ddG'])
+        df = df.where(pd.notnull(df), None)
+
+        self.df = df
+
+        # load splits produced by mmseqs clustering
+        with open(self.cfg.data_loc.fireprot_splits, 'rb') as f:
+            splits = pickle.load(f)  # this is a dict with keys train/val/test and items holding FULL PDB names for a given split
+    
+        self.wt_names = splits[self.split]
+
+        self.df = self.df.loc[self.df.pdb_id_corrected.isin(self.wt_names)].reset_index(drop=True)
+        print('Total dataset size:', self.df.shape)
+
+        self.side_chains = self.cfg.data.get('side_chains', False)
+        self.pdb_data = {}
+        for wt_name in tqdm(self.wt_names):
+            wt_name = wt_name.rstrip('.pdb')
+            pdb_file = os.path.join(self.cfg.data_loc.fireprot_pdbs, f"{wt_name}.pdb")
+            pdb = parse_PDB(pdb_file, side_chains=self.side_chains)
+            self.pdb_data[wt_name] = pdb[0]
+        
+    def __len__(self):
+        return self.df.shape[0]
+
+    def __getitem__(self, index):
+
+        pdb_list = []
+        row = self.df.iloc[index]
+        # load PDB and correct seq as needed
+        wt_name = row.pdb_id_corrected.rstrip('.pdb')
+        pdb = self.pdb_data[wt_name]
+
+        try:
+            pdb_idx = row.pdb_position
+            assert pdb['seq'][pdb_idx] == row.wild_type == row.pdb_sequence[row.pdb_position]
+            
+        except AssertionError:  # contingency for mis-alignments
+            align, *rest = pairwise2.align.globalxx(row.pdb_sequence, pdb['seq'].replace("-", "X"))
+            pdb_idx = seq1_index_to_seq2_index(align, row.pdb_position)
+
+            assert pdb['seq'][pdb_idx] == row.wild_type == row.pdb_sequence[row.pdb_position]
+
+        ddG = float(row.ddG)
+        mut = Mutation([pdb_idx], [pdb['seq'][pdb_idx]], [row.mutation], ddG, wt_name)
+        
+        pdb['mutation'] = mut
+        tmp = deepcopy(pdb)  # this is hacky but it is needed or else it overwrites all PDBs with the last data point
+
+        return tmp
 
 
 class MegaScaleDatasetv2(torch.utils.data.Dataset):
-    """Rewritten Megascale dataset doing batched mutation generation"""
+    """Rewritten Megascale dataset doing truly batched mutation generation (getitem returns 1 sample)"""
 
     def __init__(self, cfg, split):
 
@@ -340,131 +518,294 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
         fname = self.cfg.data_loc.megascale_csv
         # only load rows needed to save memory
         df = pd.read_csv(fname, usecols=["ddG_ML", "mut_type", "WT_name", "aa_seq"])
-        # remove unreliable data and more complicated mutations
+        # remove unreliable data and insertion/deletion mutations
         df = df.loc[df.ddG_ML != '-', :].reset_index(drop=True)
-
-        # new type-specific data loading - add option for multi-mutations
         df = df.loc[~df.mut_type.str.contains("ins") & ~df.mut_type.str.contains("del"), :].reset_index(drop=True)
-        mut_list = []
 
+        mut_list = []
         if 'single' in self.cfg.data.mut_types:
             mut_list.append(df.loc[~df.mut_type.str.contains(":") & ~df.mut_type.str.contains("wt"), :].reset_index(drop=True))
+        
         if 'double' in self.cfg.data.mut_types:
-            mut_list.append(df.loc[(df.mut_type.str.count(":") == 1) & (~df.mut_type.str.contains("wt")), :].reset_index(drop=True))
-
-        if len(mut_list) == 0:  # special case of loading rev muts w/no fwd muts
-            mut_list.append(df.loc[~df.mut_type.str.contains(":") & ~df.mut_type.str.contains("wt"), :].reset_index(drop=True))
-
+            tmp = df.loc[(df.mut_type.str.count(":") == 1) & (~df.mut_type.str.contains("wt")), :].reset_index(drop=True)
+            
+            # Remove hidden single mutations as these are unreliable
+            mut = tmp.mut_type.values
+            mut1 = [m.split(':')[0] for m in mut]
+            mut2 = [m.split(':')[-1] for m in mut]
+            flag = [m[0] == m[-1] for m in mut1] or [m[0] == m[-1] for m in mut2]
+            flag = ~np.array(flag)
+            tmp = tmp.loc[flag]
+            mut_list.append(tmp)
+            
         self.df = pd.concat(mut_list, axis=0).reset_index(drop=True)  # this includes points missing structure data
 
         # load splits produced by mmseqs clustering
         with open(self.cfg.data_loc.megascale_splits, 'rb') as f:
-            splits = pickle.load(f)  # this is a dict with keys train/val/test and items holding FULL PDB names for a given split
+            splits = pickle.load(f)
 
-        self.split_wt_names = {
-            "val": [],
-            "test": [],
-            "train": [],
-            "all": [], 
-        }
-        
-        if self.split == 'all':
-            all_names = splits['train'] + splits['val'] + splits['test']
-            self.split_wt_names[self.split] = all_names
-        else:
-            self.split_wt_names[self.split] = splits[self.split]
+        self.wt_names = splits[self.split]
 
-        self.wt_names = self.split_wt_names[self.split]
         # filter df for only data with structural data
         self.df = self.df.loc[self.df.WT_name.isin(self.wt_names)].reset_index(drop=True)
-        
+         
         df_list = []
         # pick which mutations to use (data augmentation)
-        if 'single' in self.cfg.data.mut_types:
-            print('Including %s direct single mutations' % str(self.df.shape[0]))
+        if ('single' in self.cfg.data.mut_types) or ('double' in self.cfg.data.mut_types):
+            print('Including %s direct single/double mutations' % str(self.df.shape[0]))
+            self.df['DIRECT'] = True
+            self.df['wt_orig'] = self.df['mut_type'].str[0]  # mark original WT for file loading use
             df_list.append(self.df)
-        elif 'double' in self.cfg.data.mut_types:
-            print('Including %s direct double mutations' % str(self.df.shape[0]))
-            df_list.append(self.df)
-
-        if 'reverse' in cfg.data.mut_types:
-            print('Adding reverse mutations!')
-            # add reverse mutations to CSV dataset
-            flipped_df = self._add_reverse_mutations()
-            print('Generated %s reverse mutations' % str(flipped_df.shape[0]))
-            df_list.append(flipped_df)
+            
+        if 'double-aug' in cfg.data.mut_types:
+            # grab single mutants even if not included in mutation type list
+            tmp = df.loc[~df.mut_type.str.contains(":") & ~df.mut_type.str.contains("wt"), :].reset_index(drop=True)
+            tmp = tmp.loc[tmp.WT_name.isin(self.wt_names)].reset_index(drop=True) # filter by split
+            
+            mut = tmp.mut_type.values
+            mut1 = [m.split(':')[0] for m in mut]
+            mut2 = [m.split(':')[-1] for m in mut]
+            flag = [m[0] == m[-1] for m in mut1] or [m[0] == m[-1] for m in mut2]
+            flag = ~np.array(flag)
+            tmp = tmp.loc[flag]
+            
+            double_aug = self._augment_double_mutants(tmp, c=1)
+            print('Generated %s augmented double mutations' % str(double_aug.shape[0]))
+            double_aug['DIRECT'] = False
+            df_list.append(double_aug)
         
-        if 'permutations' in cfg.data.mut_types:
-            print('Adding permuted mutations!')
-            permuted_df = self._add_permuted_mutations()
-            print('Generated %s permuted mutations' % str(permuted_df.shape[0]))
-            df_list.append(permuted_df)
-
+        epi = cfg.data.epi if 'epi' in cfg.data else False
+        if epi:
+            self._generate_epi_dataset()
+        
         self.df = pd.concat(df_list, axis=0).sort_values(by='WT_name').reset_index(drop=True)
+
+        self._sort_dataset()
         print('Final Dataset Size: %s ' % str(self.df.shape[0]))
 
-
-        # generate batches (lists of df idx for pulling data and matching with PDBs)
-        print('Batch size:', self.cfg.training.batch_size)
-        self.clusters = batchify(self.df.aa_seq.str.len().values, self.cfg.training.batch_size)
-        print('Generated %s batches of size %s for %s split' % (str(len(self.clusters)), str(self.cfg.training.batch_size), self.split))
-
-        # load ALL pdb data only once
+        # pre-loading wildtype structures - can avoid later file I/O for 50% of data points
+        self.side_chains = self.cfg.data.get('side_chains', False)
         self.pdb_data = {}
-        self.side_chains = self.cfg.data.side_chains if 'side_chains' in self.cfg.data else False
         for wt_name in tqdm(self.wt_names):
             wt_name = wt_name.split(".pdb")[0].replace("|",":")
             pdb_file = os.path.join(self.cfg.data_loc.megascale_pdbs, f"{wt_name}.pdb")
-            # henry get side chain parsing working
             pdb = parse_PDB(pdb_file, side_chains=self.side_chains)
             self.pdb_data[wt_name] = pdb[0]
-
+    
     def __len__(self):
-        return len(self.clusters)
+        """Total sample count instead of batch count"""
+        return self.df.shape[0]
 
     def __getitem__(self, index):
         """Batch retrieval fxn - each batch is list of protein-mutation pairs (can be different proteins)."""
-        batch_idx = self.clusters[index]
-        pdb_list = []
-        for i, row in self.df.iloc[batch_idx].iterrows():
-            # load PDB and correct seq as needed
-            pdb_CANONICAL = self.pdb_data[row.WT_name.strip('.pdb')]
-            pdb = deepcopy(pdb_CANONICAL)  # avoid modifying the original PDB sequence, just in case
-            mut_types = row.mut_type.split(':')
-            wt_list, mut_list, idx_list = [], [], []
-            
-            # if len(mut_types) > 1:  # for additive model testing
-                # mut_types = [mut_types[0]]
+        row = self.df.iloc[index]
 
-            for mt in mut_types:
-                wt = mt[0]
-                mut = mt[-1]
-                pos = int(mt[1:-1]) - 1
-                # seq needs to reflect mutation, even if flipped/modified from WT structure
-                if pdb['seq'][pos] != wt:
-                    # NEED to modify the seq_chain_A field in addition to the full seq field
-                    seq_keys = [k for k in pdb.keys() if k.startswith('seq')]
-                    if len(seq_keys) > 2:
-                        raise ValueError("Maximum of 2 seq fields expected in PDB, %s seq fields found instead" % str(len(seq_keys)))
-                    for sk in seq_keys:
-                        tmp = [p for p in pdb[sk]]
-                        tmp[pos] = wt
-                        pdb[sk] = ''.join(tmp)
-                    # check that both seqs got changed
-                    assert pdb[seq_keys[0]] == pdb[seq_keys[1]]
+        pdb_loc = self.cfg.data_loc.rosetta_data
+        wt_name = row.WT_name.rstrip(".pdb").replace("|",":")
+        chain = 'A'  # all Rocklin proteins have chain A, since they're AF2 models
+
+        mt = row.mut_type  # only single mutations for now
+        direct = row.DIRECT
+        # need to retrieve file and compile mutation object
+        
+        # four options: single, rev, double, double-rev
+        if len(mt.split(':')) > 1: # double
+            wt_list, pos_list, mut_list = [], [], []
+            for m in mt.split(':'):
+                wt_list.append(m[0])
+                pos_list.append(int(m[1:-1]) - 1)
+                mut_list.append(m[-1])
+            if direct: # double
+                pdb = self.pdb_data[row.WT_name.removesuffix('.pdb')]
                 
-                wt_list.append(wt)
-                mut_list.append(mut)
-                idx_list.append(pos)
-            ddG = -1 * float(row.ddG_ML)
-                        
-            pdb['mutation'] = Mutation(idx_list, wt_list, mut_list, ddG, row.WT_name)
-            tmp = deepcopy(pdb)  # this is hacky but it is needed or else it overwrites all PDBs with the last data point
-            pdb_list.append(tmp)
+            else: # double-rev
+                # need to flip the wt and mutant AAs for file retrieval
+                wt_ros = mut_list[0]
+                pos_ros = pos_list[0] + 1
+                mut_ros = wt_list[0]
 
-        # putting tied_featurize here means the CPU, not the GPU, handles it, and it is parallelized to each DataLoader
-        features = tied_featurize_mut(pdb_list, 'cpu', side_chains=self.side_chains)
-        return features
+                if self.side_chains:  # for now, these are stored as separate .pt files
+                    pt_tag = '_sca'
+                else:
+                    pt_tag = ''
+
+                pt_file = os.path.join(pdb_loc, wt_name, 'pdb_models', f'{chain}[{wt_ros}{pos_ros}{mut_ros}{pt_tag}].pt')
+                # if pt exists, it's way faster to load than using the pdb parser
+                if os.path.isfile(pt_file):
+                    pdb = torch.load(pt_file)
+                else:
+                    pdb_file = os.path.join(pdb_loc, wt_name, 'pdb_models', f'{chain}[{wt_ros}{pos_ros}{mut_ros}].pdb')
+                    assert os.path.isfile(pdb_file)  # check that file exists
+                    pdb = parse_PDB(pdb_file, side_chains=self.side_chains)[0]
+                    torch.save(pdb, pt_file)
+                
+        else:
+            wt_list = [mt[0]]
+            mut_list = [mt[-1]]
+            pos_list = [int(mt[1:-1]) - 1]
+            if direct: # single
+                pdb = self.pdb_data[row.WT_name.removesuffix('.pdb')]
+                
+            else: # single-rev
+                pdb_file = os.path.join(pdb_loc, 
+                                        wt_name, 
+                                        'pdb_models', 
+                                        f'{chain}[{mut_list[0]}{pos_list[0] + 1}{wt_list[0]}].pdb')
+                assert os.path.isfile(pdb_file)  # check that file exists
+                pdb = parse_PDB(pdb_file, side_chains=self.side_chains)[0]
+                                
+        tmp_pdb = deepcopy(pdb) # this is hacky but it is needed or else it overwrites all PDBs with the last data point
+
+        ddG = -1 * float(row.ddG_ML)
+        tmp_pdb['mutation'] = Mutation(pos_list, wt_list, mut_list, ddG, row.WT_name)
+        # return a SINGLE pdb object this way - not a batch of them
+        return tmp_pdb
+
+    def _sort_dataset(self):
+        """Sort the main df by sequence length"""
+        self.df['length'] = self.df.aa_seq.str.len()
+        self.df = self.df.sort_values(by='length')
+        self.df.drop(columns='length')
+        return
+
+    def _augment_double_mutants(self, df, c=1):
+        """Use pairs of single mutants and modeled structures to make new double mutant data points
+        Rewritten to be vectorized  - can handle arbitrary multiplication ratios"""
+        
+        new_df = df.copy(deep=True)
+        # trim to only single mutants
+        new_df = new_df.loc[~new_df.mut_type.str.contains(':')]
+        new_df['position'] = new_df['mut_type'].str[1:-1]
+        mutation_list, ddg_list = [], []
+
+        positions = new_df.position.values
+        wtns = new_df.WT_name.values
+
+        chunks, pchunks = {}, {}
+        # do sweep for masks only ONCE
+        for un in np.unique(wtns):
+            chunk = wtns == un
+            chunks[un] = chunk
+        
+        for pos in np.unique(positions):
+            chunk = positions == pos
+            pchunks[pos] = chunk
+
+        mutations = new_df.mut_type.values
+        ddgs = new_df.ddG_ML.values
+
+        # TODO henry add oversampling here
+        oversample = self.cfg.data.oversample if 'oversample' in self.cfg.data else None
+
+        for p, w, m, d in tqdm(zip(positions, wtns, mutations, ddgs)):
+            # pair must be in the same protein but different position, random selection
+            mask = chunks[w] * ~pchunks[p]
+            options = mutations[mask]
+            ddgs_paired = ddgs[mask]
+            if oversample == 'scale':
+                probs = minmax_scale(ddgs_paired.astype(float))
+                probs = probs / np.sum(probs)
+            elif oversample is not None:
+                # calulate Nth percentile and only keep values above this cutoff
+                cutoff = np.percentile(ddgs_paired.astype(float), q=int(oversample))
+                probs = (ddgs_paired.astype(float) > cutoff).astype(float)
+                probs = probs / np.sum(probs)
+            else:
+                probs = None
+            chosen = np.random.choice(np.arange(options.size), size=c, p=probs)
+            
+            for ch in chosen:
+                new_ddg = ddgs_paired[ch]
+                new_ddg = float(new_ddg) - float(d)
+
+                new_mut = options[ch]
+                new_mut = m[-1] + m[1:-1] + m[0] + ':' + new_mut
+
+                mutation_list.append(new_mut)
+                ddg_list.append(new_ddg)
+        
+        # parse out offset values
+        tmp_df = new_df.copy(deep=True)
+        df_list = []
+        for c_i in range(c):
+            mut_chunk = mutation_list[c_i::c]
+            ddg_chunk = ddg_list[c_i::c]
+
+            tmp_df['mut_type'] = mut_chunk
+            tmp_df['ddG_ML'] = ddg_chunk
+            df_list.append(tmp_df)
+
+        new_df = pd.concat(df_list, axis=0)
+        return new_df
+
+    def _generate_epi_dataset(self):
+        """
+        Convert self.df (double mutants) to epistatic dataset
+        """
+        print('Converting to EPI dataset')
+        # split into single/double mutants
+        singles = self.df.loc[~self.df.mut_type.str.contains(':')].reset_index(drop=True)
+        doubles = self.df.loc[self.df.mut_type.str.count(':') == 1].reset_index(drop=True)
+
+        doubles[['mut1', 'mut2']] = doubles.mut_type.str.split(':', n=1, expand=True)
+        
+        mut1 = doubles.mut1.values
+        mut2 = doubles.mut2.values
+        
+        wtns = doubles.WT_name.values
+        ddgs = doubles.ddG_ML.values.astype(float)
+        bias_list = []
+        singles.ddG_ML = singles.ddG_ML.astype(float)
+        
+        chunks, m1chunks, m2chunks = {}, {}, {}
+        sing_wtns = singles.WT_name.values
+        sing_mut = singles.mut_type.values
+        
+        # do sweep for masks only ONCE
+        for un in np.unique(wtns):
+            chunk = sing_wtns == un
+            chunks[un] = chunk
+        
+        for pos in np.unique(mut1):
+            chunk = sing_mut == pos
+            m1chunks[pos] = chunk
+        
+        for pos in np.unique(mut2):
+            chunk = sing_mut == pos
+            m2chunks[pos] = chunk
+            
+        # TODO grab additive equivalent for every double mutant
+        for m1, m2, p, d in tqdm(zip(mut1, mut2, wtns, ddgs)):
+            # grab each separate ddg based on PDB + mut_type matches
+            mask = chunks[p] * m1chunks[m1]
+            options = singles.loc[mask]
+            
+            mask2 = chunks[p] * m2chunks[m2]
+            options2 = singles.loc[mask2]
+            
+            if options.shape[0] == 0:
+                ddg1 = 0
+            else:
+                ddg1 = options.ddG_ML.values[0]
+            
+            if options2.shape[0] == 0:
+                ddg2 = 0
+            else:
+                ddg2 = options2.ddG_ML.values[0]
+            
+            # calculate bias term from ddg1+2
+            if (ddg1 == 0) or (ddg2 == 0): # if one or both single ddgs are missing, drop the data point (can't calculate epi score)
+                bias = -np.inf
+            else:
+                bias = d - (ddg1 + ddg2)
+    
+            bias_list.append(bias)
+
+        # TODO return epistasis constant in place of double mutant dataset
+        doubles.ddG_ML = bias_list
+        doubles = doubles.loc[doubles.ddG_ML != -np.inf].reset_index(drop=True)
+        self.df = doubles
+        return
     
     def _add_reverse_mutations(self):
         # for each mutation, add row w/opposite ddG sign + flipped seq, wt, mut, etc.
@@ -549,740 +890,6 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
         permuted_df = permuted_df.groupby(["WT_name", "pos"], group_keys=False).apply(lambda x: permute_subset(x))
         
         return permuted_df
-
-
-class ddgBenchDatasetv2(torch.utils.data.Dataset):
-
-    def __init__(self, cfg, pdb_dir, csv_fname, flip=False):
-
-        self.cfg = cfg
-        self.pdb_dir = pdb_dir
-        self.rev = flip  # "reverse" mutation testing
-        print('Reverse mutations: %s' % str(self.rev))
-        df = pd.read_csv(csv_fname)
-        self.df = df
-
-        self.wt_seqs = {}
-        self.mut_rows = {}
-        self.wt_names = df.PDB.unique()
-                 
-        self.pdb_data = {}
-        self.side_chains = self.cfg.data.side_chains if 'side_chains' in self.cfg.data else False
-
-        # parse all PDBs first - treat each row as its own PDB
-        for i, row in self.df.iterrows():
-            fname = row.PDB[:-1]
-            pdb_file = os.path.join(self.pdb_dir, f"{fname}.pdb")
-            chain = [row.PDB[-1]]
-            pdb = alt_parse_PDB(pdb_file, input_chain_list=chain, side_chains=self.side_chains)
-            self.pdb_data[i] = pdb[0]
-
-    def __len__(self):
-        return len(self.pdb_data)
-
-    def __getitem__(self, index):
-        """Batch retrieval fxn - do each row as its own item, for simplicity"""
-
-        pdb_list = []
-        row = self.df.iloc[index]
-        pdb_CANONICAL = self.pdb_data[index]
-        
-        if 'MUTS' in self.df.columns:
-            mut_info = row.MUTS
-            # mut_info = row.MUT1
-            # mut_info = row.MUT10
-        else:
-            mut_info = row.MUT
-
-        wt_list, mut_list, idx_list = [], [], []
-        if mut_info is np.nan:  # to skip missing mutations for additive model
-            return
-
-        if (self.cfg.dataset == 'ptmul') and ('double' not in self.cfg.data.mut_types):
-            if len(mut_info.split(';')) < 3: # skip double mutants if missing
-                return
-        if (self.cfg.dataset == 'ptmul') and ('higher' not in self.cfg.data.mut_types):
-            if len(mut_info.split(';')) > 2: # skip higher order mutants if missing
-                return
-
-        
-        if not self.rev:
-            for mt in mut_info.split(';'):  # handle multiple mutations like for megascale
-                
-                wtAA, mutAA = mt[0], mt[-1]
-                ddG = float(row.DDG) * -1
-                
-                pdb = deepcopy(pdb_CANONICAL)      
-                pdb_idx = self._get_pdb_idx(mt, pdb_CANONICAL)
-                assert pdb['seq'][pdb_idx] == wtAA
-                
-                wt_list.append(wtAA)
-                mut_list.append(mutAA)
-                idx_list.append(pdb_idx)
-                pdb['mutation'] = Mutation(idx_list, wt_list, mut_list, ddG, row.PDB[:-1])
-                
-        else:  # reverse mutations - retrieve Rosetta/modeled structures
-            fname = row.PDB[:-1]
-            chain = row.PDB[-1]
-            old_idx = int(mut_info[1:-1])
-            # print(f"{fname}{chain}_{wtAA}{old_idx}{mutAA}_relaxed.pdb")
-            pdb_file = os.path.join(self.pdb_dir, f"{fname}{chain}_{wtAA}{old_idx}{mutAA}_relaxed.pdb")
-            pdb = alt_parse_PDB(pdb_file, input_chain_list=chain, side_chains=self.side_chains)[0]
-            pdb['mutation'] = Mutation([pdb_idx], [mutAA], [wtAA], ddG * -1, row.PDB[:-1])
-        
-        # if needed, update wt seq to match passed mutations
-        seq_keys = [k for k in pdb.keys() if k.startswith('seq')]
-        if len(seq_keys) > 2:
-            raise ValueError("Maximum of 2 seq fields expected in PDB, %s seq fields found instead" % str(len(seq_keys)))
-        for sk in seq_keys:
-            tmp = [p for p in pdb[sk]]
-            tmp[pdb_idx] = wtAA
-            pdb[sk] = ''.join(tmp)   
-
-        tmp = deepcopy(pdb)  # this is hacky but it is needed or else it overwrites all PDBs with the last data point
-        pdb_list.append(tmp)
-        features = tied_featurize_mut(pdb_list, 'cpu', side_chains=self.side_chains)
-        return features
-
-        # ------ Old version set up for only single mutants ----- #
-        # wtAA, mutAA = mut_info[0], mut_info[-1]
-        # pdb_idx = self._get_pdb_idx(mut_info, pdb_CANONICAL)
-        # ddG = float(row.DDG) * -1
-
-        # if not self.rev:
-        #     pdb = deepcopy(pdb_CANONICAL)  # if you don't do this, it will overwrite each PDB entry if modified
-        #     assert pdb['seq'][pdb_idx] == wtAA
-        #     pdb['mutation'] = Mutation([pdb_idx], [wtAA], [mutAA], ddG, row.PDB[:-1])
-            
-        # else:  # retrieve Rosetta structure and save with reverse mutation
-        #     fname = row.PDB[:-1]
-        #     chain = row.PDB[-1]
-        #     old_idx = int(mut_info[1:-1])
-        #     # print(f"{fname}{chain}_{wtAA}{old_idx}{mutAA}_relaxed.pdb")
-        #     pdb_file = os.path.join(self.pdb_dir, f"{fname}{chain}_{wtAA}{old_idx}{mutAA}_relaxed.pdb")
-        #     pdb = alt_parse_PDB(pdb_file, chain)[0]
-        #     pdb['mutation'] = Mutation([pdb_idx], [mutAA], [wtAA], ddG * -1, row.PDB[:-1])
-        
-        # seq_keys = [k for k in pdb.keys() if k.startswith('seq')]
-        # if len(seq_keys) > 2:
-        #     raise ValueError("Maximum of 2 seq fields expected in PDB, %s seq fields found instead" % str(len(seq_keys)))
-        # for sk in seq_keys:
-        #     tmp = [p for p in pdb[sk]]
-        #     tmp[pdb_idx] = wtAA
-        #     pdb[sk] = ''.join(tmp)   
-
-        # tmp = deepcopy(pdb)  # this is hacky but it is needed or else it overwrites all PDBs with the last data point
-        # pdb_list.append(tmp)
-        # features = tied_featurize_mut(pdb_list, 'cpu')
-        # return features
-    
-    def _get_pdb_idx(self, mut_info, pdb):
-        """Helper function to fix any alignment issues with messy experimental data"""
-        wtAA = mut_info[0]
-        try:
-            pos = mut_info[1:-1]
-            pdb_idx = pdb['resn_list'].index(pos)
-            
-        except ValueError:  # skip positions with insertion codes for now - hard to parse
-            raise ValueError('NO PDB IDX FOUND - insertion code')
-        try:
-            assert pdb['seq'][pdb_idx] == wtAA
-        except AssertionError:  # contingency for mis-alignments
-            # if gaps are present, add these to idx (+10 to get any around the mutation site, very much an ugly hack)
-            if 'S669' in self.pdb_dir:
-                gaps = [g for g in pdb['seq'] if g == '-']
-            elif ('PTMUL' in self.pdb_dir) and ('1YCC' in pdb['name']) and ('T69E' == mut_info):  # bad case w/negative bits
-                gaps = ['-']
-            elif ('PTMUL' in self.pdb_dir) and ('1QJP' in pdb['name'] and int(mut_info[1:-1]) > 150):
-                gaps = ['-'] * 34
-
-            elif ('PTMUL' in self.pdb_dir) and ('2WSY' in pdb['name']):  # this protein does not behave well
-                gaps = ['-'] * 15
-
-                if int(mut_info[1:-1]) == 232:
-                    gaps = ['-'] * 29
-                if int(mut_info[1:-1]) == 175:
-                    gaps = ['-'] * 9
-                if int(mut_info[1:-1]) == 209:
-                    gaps = ['-'] * 28
-                    
-            else:
-                gaps = [g for g in pdb['seq'][:pdb_idx + 10] if g == '-']                
-
-            if len(gaps) > 0:
-                pdb_idx += len(gaps)
-            else:
-                pdb_idx += 1
-
-            if pdb_idx is None:
-                raise ValueError('NO PDB IDX FOUND - bad alignment')
-            
-            assert pdb['seq'][pdb_idx] == wtAA
-        return pdb_idx
-
-
-class FireProtDatasetv2(torch.utils.data.Dataset):
-
-    def __init__(self, cfg, split):
-
-        self.cfg = cfg
-        self.split = split
-
-        filename = self.cfg.data_loc.fireprot_csv
-
-        df = pd.read_csv(filename).dropna(subset=['ddG'])
-        df = df.where(pd.notnull(df), None)
-
-        self.df = df
-
-        # load splits produced by mmseqs clustering
-        with open(self.cfg.data_loc.fireprot_splits, 'rb') as f:
-            splits = pickle.load(f)  # this is a dict with keys train/val/test and items holding FULL PDB names for a given split
-            
-        self.split_wt_names = {
-            "val": [],
-            "test": [],
-            "train": [],
-            "homologue-free": [],
-            "all": []
-        }
-
-        if self.split == 'all':
-            all_names = list(splits.values())
-            all_names = [j for sub in all_names for j in sub]
-            self.split_wt_names[self.split] = all_names
-        else:
-            self.split_wt_names[self.split] = splits[self.split]
-
-        self.wt_names = self.split_wt_names[self.split]
-
-        self.df = self.df.loc[self.df.pdb_id_corrected.isin(self.wt_names)]
-        print('Total dataset size:', self.df.shape)
-        # this is a hack to get around different chain names in Fireprot dataset
-        self.cfg.training.batch_size = 100
-        self.clusters = batchify(self.df.pdb_sequence.str.len().values, self.cfg.training.batch_size)
-        print('Generated %s batches of size %s for %s split' % (str(len(self.clusters)), str(self.cfg.training.batch_size), self.split))
-        self.side_chains = self.cfg.data.side_chains if 'side_chains' in self.cfg.data else False
-
-        self.pdb_data = {}
-        for wt_name in tqdm(self.wt_names):
-            wt_name = wt_name.rstrip('.pdb')
-            pdb_file = os.path.join(self.cfg.data_loc.fireprot_pdbs, f"{wt_name}.pdb")
-            pdb = parse_PDB(pdb_file, side_chains=self.side_chains)
-            self.pdb_data[wt_name] = pdb[0]
-        
-    def __len__(self):
-        return len(self.clusters)
-
-    def __getitem__(self, index):
-
-        batch_idx = self.clusters[index]
-        pdb_list = []
-        for i, row in self.df.iloc[batch_idx].iterrows():
-            # load PDB and correct seq as needed
-            wt_name = row.pdb_id_corrected.rstrip('.pdb')
-            pdb = self.pdb_data[wt_name]
-    
-            try:
-                pdb_idx = row.pdb_position
-                assert pdb['seq'][pdb_idx] == row.wild_type == row.pdb_sequence[row.pdb_position]
-                
-            except AssertionError:  # contingency for mis-alignments
-                align, *rest = pairwise2.align.globalxx(row.pdb_sequence, pdb['seq'].replace("-", "X"))
-                pdb_idx = seq1_index_to_seq2_index(align, row.pdb_position)
-                if pdb_idx is None:
-                    continue
-                assert pdb['seq'][pdb_idx] == row.wild_type == row.pdb_sequence[row.pdb_position]
-
-            ddG = float(row.ddG)
-            mut = Mutation([pdb_idx], [pdb['seq'][pdb_idx]], [row.mutation], ddG, wt_name)
-            
-            pdb['mutation'] = mut
-            tmp = deepcopy(pdb)  # this is hacky but it is needed or else it overwrites all PDBs with the last data point
-            pdb_list.append(tmp)
-
-        features = tied_featurize_mut(pdb_list, 'cpu', side_chains=self.side_chains)
-        return features
-
-
-class MegaScaleDatasetv2Aug(MegaScaleDatasetv2):
-    """Rewritten Megascale dataset doing batched mutation generation"""
-
-    def __init__(self, cfg, split):
-
-        self.cfg = cfg
-        self.split = split  # which split to retrieve
-        fname = self.cfg.data_loc.megascale_csv
-        # only load rows needed to save memory
-        df = pd.read_csv(fname, usecols=["ddG_ML", "mut_type", "WT_name", "aa_seq"])
-        # remove unreliable data and more complicated mutations
-        df = df.loc[df.ddG_ML != '-', :].reset_index(drop=True)
-
-        # new type-specific data loading - add option for multi-mutations
-        df = df.loc[~df.mut_type.str.contains("ins") & ~df.mut_type.str.contains("del"), :].reset_index(drop=True)
-        mut_list = []
-        if 'single' in self.cfg.data.mut_types:
-            mut_list.append(df.loc[~df.mut_type.str.contains(":") & ~df.mut_type.str.contains("wt"), :].reset_index(drop=True))
-        
-        if 'double' in self.cfg.data.mut_types:
-            mut_list.append(df.loc[(df.mut_type.str.count(":") == 1) & (~df.mut_type.str.contains("wt")), :].reset_index(drop=True))
-
-        if len(mut_list) == 0:  # special case of loading rev muts w/no fwd muts
-            mut_list.append(df.loc[~df.mut_type.str.contains(":") & ~df.mut_type.str.contains("wt"), :].reset_index(drop=True))
-
-        self.df = pd.concat(mut_list, axis=0).reset_index(drop=True)  # this includes points missing structure data
-
-        # load splits produced by mmseqs clustering
-        with open(self.cfg.data_loc.megascale_splits, 'rb') as f:
-            splits = pickle.load(f)  # this is a dict with keys train/val/test and items holding FULL PDB names for a given split
-
-        self.split_wt_names = {
-            "val": [],
-            "test": [],
-            "train": [],
-            "all": [], 
-        }
-        
-        if self.split == 'all':
-            all_names = splits['train'] + splits['val'] + splits['test']
-            self.split_wt_names[self.split] = all_names
-        else:
-            self.split_wt_names[self.split] = splits[self.split]
-
-        self.wt_names = self.split_wt_names[self.split]
-        # filter df for only data with structural data
-        self.df = self.df.loc[self.df.WT_name.isin(self.wt_names)].reset_index(drop=True)
-        
-                
-        df_list = []
-        # pick which mutations to use (data augmentation)
-        if 'single' in self.cfg.data.mut_types:
-            print('Including %s direct single mutations' % str(self.df.shape[0]))
-            self.df['DIRECT'] = True
-            self.df['wt_orig'] = self.df['mut_type'].str[0]  # mark original WT for file loading use
-            df_list.append(self.df)
-            
-        if 'double' in self.cfg.data.mut_types:
-            print('Including %s direct double mutations' % str(self.df.shape[0]))
-            self.df['DIRECT'] = True
-            df_list.append(self.df)
-        
-        if 'reverse' in cfg.data.mut_types:
-            print('Adding reverse mutations!')
-            # add reverse mutations to CSV dataset
-            flipped_df = self._add_reverse_mutations()
-            print('Generated %s reverse mutations' % str(flipped_df.shape[0]))
-            flipped_df['DIRECT'] = False
-            df_list.append(flipped_df)
-        
-        if 'permutations' in cfg.data.mut_types:
-            print('Adding permuted mutations!')
-            permuted_df = self._add_permuted_mutations()
-            print('Generated %s permuted mutations' % str(permuted_df.shape[0]))
-            permuted_df['DIRECT'] = False
-            df_list.append(permuted_df)
-
-        if 'double-aug' in cfg.data.mut_types:
-            # grab single mutants even if not included in mutation type list
-            tmp = df.loc[~df.mut_type.str.contains(":") & ~df.mut_type.str.contains("wt"), :].reset_index(drop=True)
-            tmp = tmp.loc[tmp.WT_name.isin(self.wt_names)].reset_index(drop=True)
-            
-            aug_mutant_multiple = 1  # for each single mutant, how many double mutant augmented points to make
-            double_aug = self._augment_double_mutants(tmp, n=aug_mutant_multiple)
-            print('Generated %s augmented double mutations' % str(double_aug.shape[0]))
-            double_aug['DIRECT'] = False
-            df_list.append(double_aug)
-        
-        self.df = pd.concat(df_list, axis=0).sort_values(by='WT_name').reset_index(drop=True)
-        print('Final Dataset Size: %s ' % str(self.df.shape[0]))
-
-        # generate batches (lists of df idx for pulling data and matching with PDBs)
-        self.clusters = batchify(self.df.aa_seq.str.len().values, self.cfg.training.batch_size)
-        print('Generated %s batches of size %s for %s split' % (str(len(self.clusters)), str(self.cfg.training.batch_size), self.split))
-
-        # pre-loading wildtype structures - can avoid file I/O for 50% of data points
-        self.pdb_data = {}
-        for wt_name in tqdm(self.wt_names):
-            wt_name = wt_name.split(".pdb")[0].replace("|",":")
-            pdb_file = os.path.join(self.cfg.data_loc.megascale_pdbs, f"{wt_name}.pdb")
-            pdb = parse_PDB(pdb_file)
-            self.pdb_data[wt_name] = pdb[0]
-    
-    def _augment_double_mutants(self, df, n=1):
-        """Use pairs of single mutants and modeled structures to make new double mutant data points
-        df is the full dataframe (can be just single mutants or single + double)
-        n is the number of augmented data points to make for every single mutant example"""
-        
-        print('Augment Mutant Coefficient:', n)
-        new_df = df.copy(deep=True)
-        # trim to only single mutants
-        new_df = new_df.loc[~new_df.mut_type.str.contains(':')]
-        new_df['position'] = new_df['mut_type'].str[1:-1]
-        mutation_list, ddg_list = [], []
-        
-        # run stochastic augmentation on every single mutant
-        for i, row in tqdm(new_df.iterrows()):
-            # select a random row from the same protein with a different position
-            aug_options = new_df.loc[(new_df.WT_name == row.WT_name) & (new_df.position != row.position)]
-            # for each chosen sample, make a new data point
-            chosen = aug_options.sample(n=n)
-            for c, crow in chosen.iterrows():
-                # combine mut type and ddG columns, all else can remain
-                new_mut = row.mut_type[-1] + row.mut_type[1:-1] + row.mut_type[0]  # can't reverse string - breaks numbers
-                new_mut = new_mut + ':' + crow.mut_type
-                new_ddg = float(crow.ddG_ML) - float(row.ddG_ML)
-
-                mutation_list.append(new_mut)
-                ddg_list.append(new_ddg)
-        
-        new_df = new_df.drop('position', axis=1)
-        df_list = []
-        # for each mutation chunk, 
-        for c in range(n):
-            print(c, n)
-            partial_df = new_df.copy(deep=True)
-            # select every nth mutation with an offset of c
-            partial_df['mut_type'] = mutation_list[c : : n]
-            partial_df['ddG_ML'] = ddg_list[c : : n]
-            df_list.append(partial_df)
-            print(partial_df.head)
-            print('-' * 50)
-        print('=' * 50)
-        new_df = pd.concat(df_list, axis=0)
-        print(new_df.head)
-        return new_df
-    
-    def __getitem__(self, index):
-        """Batch retrieval fxn - each batch is list of protein-mutation pairs (can be different proteins)."""
-        batch_idx = self.clusters[index]
-        pdb_list = []
-        for i, row in self.df.iloc[batch_idx].iterrows():
-
-            pdb_loc = '/work/users/d/i/dieckhau/rocklin_data/FINAL_results/'
-            wt_name = row.WT_name.rstrip(".pdb").replace("|",":")
-            chain = 'A'  # all Rocklin proteins have chain A, since they're simulated
-
-            mt = row.mut_type  # only single mutations for now
-            direct = row.DIRECT
-            # need to retrieve file and compile mutation object
-            
-            # four options: single, rev, double, double-rev
-            if len(mt.split(':')) > 1: # double
-                wt_list, pos_list, mut_list = [], [], []
-                for m in mt.split(':'):
-                    wt_list.append(m[0])
-                    pos_list.append(int(m[1:-1]) - 1)
-                    mut_list.append(m[-1])
-                if direct: # double
-                    pdb = self.pdb_data[row.WT_name.removesuffix('.pdb')]
-                    
-                else: # double-rev
-                    # need to flip the wt and mutant AAs for file retrieval
-                    wt_ros = mut_list[0]
-                    pos_ros = pos_list[0] + 1
-                    mut_ros = wt_list[0]
-                    pdb_file = os.path.join(pdb_loc, 
-                                            wt_name, 
-                                            'pdb_models', 
-                                            f'{chain}[{wt_ros}{pos_ros}{mut_ros}].pdb')
-                    assert os.path.isfile(pdb_file)  # check that file exists
-                    pdb = parse_PDB(pdb_file)[0]
-                    
-            else:
-                wt_list = [mt[0]]
-                mut_list = [mt[-1]]
-                pos_list = [int(mt[1:-1]) - 1]
-                if direct: # single
-                    pdb = self.pdb_data[row.WT_name.removesuffix('.pdb')]
-                    
-                else: # single-rev
-                    pdb_file = os.path.join(pdb_loc, 
-                                            wt_name, 
-                                            'pdb_models', 
-                                            f'{chain}[{mut_list[0]}{pos_list[0] + 1}{wt_list[0]}].pdb')
-                    assert os.path.isfile(pdb_file)  # check that file exists
-                    pdb = parse_PDB(pdb_file)[0]
-                                    
-            tmp_pdb = deepcopy(pdb) # this is hacky but it is needed or else it overwrites all PDBs with the last data point
-
-            ddG = -1 * float(row.ddG_ML)
-            tmp_pdb['mutation'] = Mutation(pos_list, wt_list, mut_list, ddG, row.WT_name)
-            pdb_list.append(tmp_pdb)
-
-        # putting tied_featurize here means the CPU, not the GPU, handles it, and it is parallelized to each DataLoader
-        features = tied_featurize_mut(pdb_list, 'cpu')
-        # save as .pt file for later loading
-        # loc = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/batched_mega_scale/double_aug'
-        # loc = '/proj/kuhl_lab/users/dieckhau/data/mega_scale/batched_TR_TP'
-        # fpath = os.path.join('%s/%s' % (loc, self.split), f'batch_{index}.pt')
-        # torch.save(features, fpath)
-        # print('Saved batch %s' % str(index))
-        return features
-
-
-class MegaScaleDatasetv2Pt(torch.utils.data.Dataset):
-    """Rewritten Megascale dataset loading individual .pt files as batches"""
-
-    def __init__(self, cfg, split):
-        self.cfg = cfg
-        self.split = split  # which split to retrieve
-        
-        if 'reverse' in cfg.data.mut_types:
-            if 'permutations' in cfg.data.mut_types:
-                self.pt_loc = os.path.join('/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/batched_mega_scale/batched_TR_TP', self.split)
-                
-            else:
-                self.pt_loc = os.path.join('/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/batched_mega_scale/batched_TR', self.split)
-                
-        elif 'confidence' in cfg.data.mut_types:
-            print('Loading confidence batched dataset')
-            self.pt_loc = os.path.join('/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/batched_mega_scale/conf_batches', self.split)
-            
-        elif 'double-aug' in cfg.data.mut_types:
-            print('Loading augmented double mutant dataset')
-            self.pt_loc = os.path.join('/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/batched_mega_scale/double_aug', self.split)
-        else:
-            raise ValueError("Invalid PT-based dataset selected")
-
-        self.batch_files = sorted(os.listdir(self.pt_loc))
-        self.batch_files = [sb for sb in self.batch_files if sb.endswith('.pt')]
-            
-    def __len__(self):
-        return len(self.batch_files)
-
-    def __getitem__(self, index):
-        """Batch retrieval fxn - each batch is pre-packed into a .pt file"""
-        current_batch = f'batch_{index}.pt'
-        current_batch = os.path.join(self.pt_loc, current_batch)
-        features = torch.load(current_batch)
-        return features
-
-
-class FireProtDatasetv2Confidence(torch.utils.data.Dataset):
-    """For confidence estimation"""
-    def __init__(self, cfg, split):
-        self.cfg = cfg
-        self.split = split  # which split to retrieve
-        
-        if 'confidence' in cfg.data.mut_types:
-            print('Loading confidence batched dataset')
-            self.pt_loc = os.path.join('/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/batched_mega_scale/conf_batches/fireprot', self.split)
-        else:
-            raise ValueError("Invalid PT-based dataset selected")
-
-        self.batch_files = sorted(os.listdir(self.pt_loc))
-        self.batch_files = [sb for sb in self.batch_files if sb.endswith('.pt')]
-            
-    def __len__(self):
-        return len(self.batch_files)
-
-    def __getitem__(self, index):
-        """Batch retrieval fxn - each batch is pre-packed into a .pt file"""
-        current_batch = f'batch_{index}.pt'
-        current_batch = os.path.join(self.pt_loc, current_batch)
-        features = torch.load(current_batch)
-        return features
-
-
-class MegaScaleDatasetv2Rebatched(MegaScaleDatasetv2Aug):
-    """Rewritten Megascale dataset doing truly batched mutation generation (getitem returns 1 sample)"""
-
-    def __init__(self, cfg, split):
-
-        self.cfg = cfg
-        self.split = split  # which split to retrieve
-        fname = self.cfg.data_loc.megascale_csv
-        # only load rows needed to save memory
-        df = pd.read_csv(fname, usecols=["ddG_ML", "mut_type", "WT_name", "aa_seq"])
-        # remove unreliable data and more complicated mutations
-        df = df.loc[df.ddG_ML != '-', :].reset_index(drop=True)
-
-        # new type-specific data loading - add option for multi-mutations
-        df = df.loc[~df.mut_type.str.contains("ins") & ~df.mut_type.str.contains("del"), :].reset_index(drop=True)
-        mut_list = []
-        if 'single' in self.cfg.data.mut_types:
-            mut_list.append(df.loc[~df.mut_type.str.contains(":") & ~df.mut_type.str.contains("wt"), :].reset_index(drop=True))
-        
-        if 'double' in self.cfg.data.mut_types:
-            mut_list.append(df.loc[(df.mut_type.str.count(":") == 1) & (~df.mut_type.str.contains("wt")), :].reset_index(drop=True))
-
-        if len(mut_list) == 0:  # special case of loading rev muts w/no fwd muts
-            mut_list.append(df.loc[~df.mut_type.str.contains(":") & ~df.mut_type.str.contains("wt"), :].reset_index(drop=True))
-
-        self.df = pd.concat(mut_list, axis=0).reset_index(drop=True)  # this includes points missing structure data
-
-        # load splits produced by mmseqs clustering
-        with open(self.cfg.data_loc.megascale_splits, 'rb') as f:
-            splits = pickle.load(f)  # this is a dict with keys train/val/test and items holding FULL PDB names for a given split
-
-        self.wt_names = splits[self.split]
-        # filter df for only data with structural data
-        self.df = self.df.loc[self.df.WT_name.isin(self.wt_names)].reset_index(drop=True)
-         
-        df_list = []
-        # pick which mutations to use (data augmentation)
-        if ('single' in self.cfg.data.mut_types) or ('double' in self.cfg.data.mut_types):
-            print('Including %s direct single/double mutations' % str(self.df.shape[0]))
-            self.df['DIRECT'] = True
-            self.df['wt_orig'] = self.df['mut_type'].str[0]  # mark original WT for file loading use
-            df_list.append(self.df)
-            
-        if 'double-aug' in cfg.data.mut_types:
-            # grab single mutants even if not included in mutation type list
-            tmp = df.loc[~df.mut_type.str.contains(":") & ~df.mut_type.str.contains("wt"), :].reset_index(drop=True)
-            tmp = tmp.loc[tmp.WT_name.isin(self.wt_names)].reset_index(drop=True)
-            
-            # derive c value as inverse of batch_fraction
-            batch_c = 1 if 'batch_fraction' not in cfg.training else int(1/cfg.training.batch_fraction)
-            
-            double_aug = self._augment_double_mutants(tmp, c=batch_c)
-            print('Generated %s augmented double mutations' % str(double_aug.shape[0]))
-            double_aug['DIRECT'] = False
-            df_list.append(double_aug)
-        
-        self.df = pd.concat(df_list, axis=0).sort_values(by='WT_name').reset_index(drop=True)
-
-        # TODO rewrite batchify to reorder an existing self.df according to length
-        self._sort_dataset()
-        print('Final Dataset Size: %s ' % str(self.df.shape[0]))
-
-        # pre-loading wildtype structures - can avoid later file I/O for 50% of data points
-        self.pdb_data = {}
-        for wt_name in tqdm(self.wt_names):
-            wt_name = wt_name.split(".pdb")[0].replace("|",":")
-            pdb_file = os.path.join(self.cfg.data_loc.megascale_pdbs, f"{wt_name}.pdb")
-            pdb = parse_PDB(pdb_file)
-            self.pdb_data[wt_name] = pdb[0]
-    
-    def _sort_dataset(self):
-        """Sort the main df by sequence length"""
-        self.df['length'] = self.df.aa_seq.str.len()
-        self.df = self.df.sort_values(by='length')
-        self.df.drop(columns='length')
-        return
-    
-    def __len__(self):
-        """Total sample count instead of batch count"""
-        return self.df.shape[0]
-    
-    def _augment_double_mutants(self, df, c=1):
-        """Use pairs of single mutants and modeled structures to make new double mutant data points
-        Rewritten to be vectorized  - can handle arbitrary multiplication ratios"""
-        
-        new_df = df.copy(deep=True)
-        # trim to only single mutants
-        new_df = new_df.loc[~new_df.mut_type.str.contains(':')]
-        new_df['position'] = new_df['mut_type'].str[1:-1]
-        mutation_list, ddg_list = [], []
-
-        positions = new_df.position.values
-        wtns = new_df.WT_name.values
-
-        chunks, pchunks = {}, {}
-        # do sweep for masks only ONCE
-        for un in np.unique(wtns):
-            chunk = wtns == un
-            chunks[un] = chunk
-        
-        for pos in np.unique(positions):
-            chunk = positions == pos
-            pchunks[pos] = chunk
-
-        mutations = new_df.mut_type.values
-        ddgs = new_df.ddG_ML.values
-        for p, w, m, d in tqdm(zip(positions, wtns, mutations, ddgs)):
-            # pair must be in the same protein but different position, random selection
-            mask = chunks[w] * ~pchunks[p]
-            options = mutations[mask]
-            ddgs_paired = ddgs[mask]
-
-            chosen = np.random.choice(np.arange(options.size), size=c)
-            
-            for ch in chosen:
-                new_ddg = ddgs_paired[ch]
-                new_ddg = float(new_ddg) - float(d)
-
-                new_mut = options[ch]
-                new_mut = m[-1] + m[1:-1] + m[0] + ':' + new_mut
-
-                mutation_list.append(new_mut)
-                ddg_list.append(new_ddg)
-        
-        # parse out offset values
-        tmp_df = new_df.copy(deep=True)
-        df_list = []
-        for c_i in range(c):
-            mut_chunk = mutation_list[c_i::c]
-            ddg_chunk = ddg_list[c_i::c]
-
-            tmp_df['mut_type'] = mut_chunk
-            tmp_df['ddG_ML'] = ddg_chunk
-            df_list.append(tmp_df)
-
-        new_df = pd.concat(df_list, axis=0)
-        return new_df
-
-    
-    def __getitem__(self, index):
-        """Batch retrieval fxn - each batch is list of protein-mutation pairs (can be different proteins)."""
-        row = self.df.iloc[index]
-
-        pdb_loc = self.cfg.data_loc.rosetta_data
-        # pdb_loc = '/work/users/d/i/dieckhau/rocklin_data/FINAL_results/'
-        wt_name = row.WT_name.rstrip(".pdb").replace("|",":")
-        chain = 'A'  # all Rocklin proteins have chain A, since they're simulated
-
-        mt = row.mut_type  # only single mutations for now
-        direct = row.DIRECT
-        # need to retrieve file and compile mutation object
-        
-        # four options: single, rev, double, double-rev
-        if len(mt.split(':')) > 1: # double
-            wt_list, pos_list, mut_list = [], [], []
-            for m in mt.split(':'):
-                wt_list.append(m[0])
-                pos_list.append(int(m[1:-1]) - 1)
-                mut_list.append(m[-1])
-            if direct: # double
-                pdb = self.pdb_data[row.WT_name.removesuffix('.pdb')]
-                
-            else: # double-rev
-                # need to flip the wt and mutant AAs for file retrieval
-                wt_ros = mut_list[0]
-                pos_ros = pos_list[0] + 1
-                mut_ros = wt_list[0]
-
-                pt_file = os.path.join(pdb_loc, wt_name, 'pdb_models', f'{chain}[{wt_ros}{pos_ros}{mut_ros}].pt')
-                # if pt exists, it's way faster to load than using the pdb parser
-                if os.path.isfile(pt_file):
-                    pdb = torch.load(pt_file)
-                else:
-                    pdb_file = os.path.join(pdb_loc, wt_name, 'pdb_models', f'{chain}[{wt_ros}{pos_ros}{mut_ros}].pdb')
-                    assert os.path.isfile(pdb_file)  # check that file exists
-                    pdb = parse_PDB(pdb_file)[0]
-                    torch.save(pdb, pt_file)
-                
-        else:
-            wt_list = [mt[0]]
-            mut_list = [mt[-1]]
-            pos_list = [int(mt[1:-1]) - 1]
-            if direct: # single
-                pdb = self.pdb_data[row.WT_name.removesuffix('.pdb')]
-                
-            else: # single-rev
-                pdb_file = os.path.join(pdb_loc, 
-                                        wt_name, 
-                                        'pdb_models', 
-                                        f'{chain}[{mut_list[0]}{pos_list[0] + 1}{wt_list[0]}].pdb')
-                assert os.path.isfile(pdb_file)  # check that file exists
-                pdb = parse_PDB(pdb_file)[0]
-                                
-        tmp_pdb = deepcopy(pdb) # this is hacky but it is needed or else it overwrites all PDBs with the last data point
-
-        ddG = -1 * float(row.ddG_ML)
-        tmp_pdb['mutation'] = Mutation(pos_list, wt_list, mut_list, ddG, row.WT_name)
-        # return a SINGLE pdb object this way
-        return tmp_pdb
 
 
 def prebatch_dataset(dataset, workers=1):

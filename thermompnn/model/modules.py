@@ -30,7 +30,8 @@ def get_protein_mpnn(cfg, version='v_48_020.pt'):
     # checkpoint_path = "vanilla_model_weights/v_48_020.pt"
     checkpoint = torch.load(checkpoint_path, map_location='cpu') 
     model = ProteinMPNN(use_ipmp=use_IPMP, num_letters=21, node_features=hidden_dim, edge_features=hidden_dim, hidden_dim=hidden_dim, 
-                        num_encoder_layers=num_layers, num_decoder_layers=num_layers, k_neighbors=checkpoint['num_edges'], augment_eps=0.0)
+                        num_encoder_layers=num_layers, num_decoder_layers=num_layers, k_neighbors=checkpoint['num_edges'], augment_eps=0.0, ) 
+
     if cfg.model.load_pretrained:
         model.load_state_dict(checkpoint['model_state_dict'])
     
@@ -145,17 +146,14 @@ class SideChainProteinFeatures(nn.Module):
         D_A_B = torch.sqrt(torch.sum((A[:,:,None,:] - B[:,None,:,:])**2,-1) + 1e-6) #[B, L, L]
         D_A_B_neighbors = gather_edges(D_A_B[:,:,:,None], E_idx)[:,:,:,0] #[B,L,K]
 
-        # make pairwise atom mask - ORIG config
+        # make pairwise atom mask
         combo = torch.unsqueeze(torch.unsqueeze(A_mask, 2) * torch.unsqueeze(B_mask, 1), -1) # [B, L, L, 1]
         
-        # TODO henry try both combinations - ALT config (name=transp)
-        # combo = torch.unsqueeze(torch.unsqueeze(A_mask, 1) * torch.unsqueeze(B_mask, 2), -1) # [B, L, L, 1]
-
         # gather K neighbors out of overall mask        
         combo = torch.unsqueeze(gather_edges(combo, E_idx)[..., 0], -1) # [B, L, K, 1]
         
         # mask RBFs directly using paired atom mask
-        # RBF_A_B = self._rbf(D_A_B_neighbors)
+        # RBF_A_B = self._rbf(D_A_B_neighbors) # un-masked original command
         RBF_A_B = self._rbf(D_A_B_neighbors) * combo.expand(combo.shape[0], combo.shape[1], combo.shape[2], self.num_rbf) # [B, L, K, N_RBF]
         return RBF_A_B
 
@@ -166,12 +164,12 @@ class SideChainProteinFeatures(nn.Module):
         Cb = -0.58273431*a + 0.56802827*b - 0.54067466*c + CA
         return Cb
 
-    def _atomic_distances(self, X, E_idx, atom_mask):
+    def _atomic_distances(self, X, E_idx, atom_mask, S=None):
         RBF_all = []
         
         if self.action_centers != 'none':
-            X, atom_mask = self._action_centers(X, atom_mask)
-        
+            X, atom_mask = self._action_centers(X, atom_mask, S)
+
         for i in range(X.shape[-2]):
             for j in range(X.shape[-2]):
                 # pass specific  atom masks to RBF fxn
@@ -180,7 +178,7 @@ class SideChainProteinFeatures(nn.Module):
         RBF_all = torch.cat(tuple(RBF_all), dim=-1)    
         return RBF_all
     
-    def _action_centers(self, X, atom_mask):
+    def _action_centers(self, X, atom_mask, S=None):
         """Takes full coord set [B, L, 14, 3] and atom mask [B, L, 14]
         returns X with appended action center [B, L, 5, 3] and updated atom mask [B, L, 5]        
         """
@@ -204,15 +202,74 @@ class SideChainProteinFeatures(nn.Module):
             num_atoms = torch.sum(atom_mask, dim=-1) # [B, L]
             num_atoms = num_atoms[:, :, None, None].repeat(1, 1, 1, 3) # [B, L, 1, 3]
             num_atoms[num_atoms <= 0] = 1 # if no atoms exist, need to keep from throwing index error
-            X_ac = torch.gather(X, dim=-2, index=num_atoms - 1) # [B, L, 1, 3]
+            X_ac = torch.gather(X, dim=-2, index=num_atoms.to(int) - 1) # [B, L, 1, 3]
             X = torch.cat([X[:, :, :4, :], X_ac], dim=-2) # [B, L, 5, 3]
             atom_mask = atom_mask[:, :, :5] # [B, L, 5]
+            return X, atom_mask
+        
+        elif self.action_centers == 'bk':
+            # X [B, L, 14, 3]
+            # atom_mask [B, L, 14]
+            # S [B, L] where S is an integer representation of each amino acid
+
+            S_atom_map = torch.tensor([
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0], # A
+                [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0], # C
+                [0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0], # D
+                [0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0], # E
+                [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0], # F
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0], # G
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], # H
+                [0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0], # I
+                [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0], # K
+                [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0], # L
+                [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0], # M
+                [0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0], # N
+                [1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0], # P
+                [0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0], # Q
+                [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0], # R
+                [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0], # S
+                [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0], # T
+                [0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0], # V
+                [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1], # W
+                [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0], # Y
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], # X
+            ], device=X.device) # [21, 14]
+            
+            def batched_index_select(input, dim, index):
+                for ii in range(1, len(input.shape)):
+                    if ii != dim:
+                        index = index.unsqueeze(ii)
+                expanse = list(input.shape)
+                expanse[0] = -1
+                expanse[dim] = -1
+                index = index.expand(expanse)
+                return torch.gather(input, dim, index)
+            
+            # make action center atom map to select specific atoms for COM calculation
+            ac_atom_map = torch.zeros_like(atom_mask, device=atom_mask.device) # [B, L, 14]
+            for b in range(S.shape[0]): # iterate over batch for clarity
+                S_tmp = S_atom_map[None, :, :].repeat(S.shape[-1], 1, 1) # [L, 21, 14]
+                # [L, 21, 14] against [L] to return [L, 14] mask for a single batch sample
+                single_atom_map = torch.squeeze(batched_index_select(S_tmp, dim=-2, index=S[b, :]), 1) # [L, 14]
+                ac_atom_map[b, :, :] = single_atom_map
+            
+            # taking mean position of ONLY the selected atoms
+            X_m = X * ac_atom_map[:, :, :, None].repeat(1, 1, 1, 3)
+            X_m[X_m == 0.] = torch.nan
+            X_ac = torch.nanmean(X_m, dim=-2)
+
+            X_ac[X_ac.isnan()] = X[:, :, 4, :][X_ac.isnan()] # if missing key atom(s), fill with virtual Cb
+            X_ac = torch.nan_to_num(X_ac) # just-in-case fill with zeros
+            # add action center back onto the X info
+            X = torch.cat([X[:, :, :4, :], X_ac[:, :, None, :]], dim=-2)
+            atom_mask = atom_mask[:, :, :5]
             return X, atom_mask
         
         else:
             raise ValueError("Invalid action center setting!")
 
-    def forward(self, X, mask, residue_idx, chain_labels, atom_mask):
+    def forward(self, X, mask, residue_idx, chain_labels, atom_mask, S=None):
         
         if self.augment_eps > 0:
             X = X + self.augment_eps * torch.randn_like(X)
@@ -233,7 +290,7 @@ class SideChainProteinFeatures(nn.Module):
         sc_atoms = X[..., 5:, :]
         X2 = torch.stack((N, Ca, C, O, Cb), dim=-2)
         X2 = torch.cat((X2, sc_atoms), dim=-2) 
-        RBF_all = self._atomic_distances(X2, E_idx, 1 - atom_mask)
+        RBF_all = self._atomic_distances(X2, E_idx, 1 - atom_mask, S)
         E = torch.cat((E_positional, RBF_all), -1)
 
         # Embed edges
@@ -258,54 +315,34 @@ class SideChainModule(nn.Module):
         
         self.W_e = nn.Linear(edge_features, hidden_dim, bias=True)
         
-        # self.W_s = nn.Embedding(vocab, hidden_dim)
         self.thru = thru
         
         if self.thru:
             num_in = 128 + 128
         else:
             num_in = 128     
-        self.sc_agg = SimpleMPNNAgg(num_hidden=128, num_in=num_in, dropout=0.1, scale=top_k)
-        
-        # self.sc_layers = nn.ModuleList([
-        #     DecLayer(hidden_dim, hidden_dim*3, dropout=dropout)
-        #     for _ in range(encoder_layers)
-        # ])
+        self.sc_agg = SimpleMPNNAgg(num_hidden=128, num_in=num_in, dropout=0.2, scale=top_k)
     
     def forward(self, X, S, mask, chain_M, residue_idx, chain_encoding_all, h_V, atom_mask):
         # generate features (RBFs and positional encodings)
         if self.augment_eps > 0:
             X = X + self.augment_eps * torch.randn_like(X)
-        
-        E, E_idx = self.features(X, mask, residue_idx, chain_encoding_all, atom_mask)
+
+        E, E_idx = self.features(X, mask, residue_idx, chain_encoding_all, atom_mask, S)
         
         # make hidden dim encoding
         h_E = self.W_e(E) # [B, L, K, H]
         
-        # embed sequence nodes
-        # h_S = self.W_s(S) # [B, L, H]
-        
-        # grab neighbor sequence nodes
-        # h_ES = cat_neighbors_nodes(h_S, h_E, E_idx) # [B, L, K, H * 2]
-
         # mask keeping all residues except padding
         mask_attend = gather_nodes(mask.unsqueeze(-1), E_idx).squeeze(-1)
         mask_attend = mask.unsqueeze(-1) * mask_attend
 
-        # TODO add handling for using existing h_V
         if self.thru:
             h_V_expand = h_V.unsqueeze(-2).expand(-1, -1, h_E.size(-2), -1)
             h_EV = torch.cat([h_V_expand, h_E], -1)
             h_V = self.sc_agg(h_EV, mask_attend)
         else:  
             h_V = self.sc_agg(h_E, mask_attend) # [B, L, H]
-        
-        # for layer in self.sc_layers:
-        #     # decoder layers do node updates only, using node + seq + edge information
-        #     h_ESV = cat_neighbors_nodes(h_V, h_ES, E_idx)
-        #     print(h_ESV.shape , mask.attend.shape)
-        #     h_ESV = mask_attend * h_ESV
-        #     h_V = layer(h_V, h_ESV, mask)
         
         return h_V
 
@@ -344,6 +381,7 @@ class SimpleMPNNAgg(nn.Module):
         dh = torch.sum(h_message, -2) / self.scale
         h_V = self.norm1(self.dropout1(dh))
 
+        # NOTE: only enabled for EXP2.8.base, otherwise, commented out
         # Position-wise feedforward
         # dh = self.dense(h_V)
         
@@ -381,68 +419,6 @@ class LightAttention(nn.Module):
         attention = self.attention_convolution(x)  # [batch_size, embeddings_dim, sequence_length]
         o1 = o * self.softmax(attention)  # [batch_size, embeddings_dim, sequence_length]
         return torch.squeeze(o1, -1)
-
-
-class MultHeadAttn(nn.Module):
-    """Implementation of multi-head attention
-    Based on https://www.kaggle.com/code/arunmohan003/transformer-from-scratch-using-pytorch
-    """
-    def __init__(self, embed_dim=512, n_heads=8):
-        super(MultHeadAttn, self).__init__()
-        self.embed_dim = embed_dim
-        self.n_heads = n_heads
-        self.single_head_dim = int(self.embed_dim / self.n_heads) # each qkv will be of value (embed_dim / n_heads)
-
-        # make qkv matrices
-        self.query_matrix = nn.Linear(self.single_head_dim, self.single_head_dim, bias=False)  # single key matrix for all 8 keys #512x512
-        self.key_matrix = nn.Linear(self.single_head_dim, self.single_head_dim, bias=False)
-        self.value_matrix = nn.Linear(self.single_head_dim,self.single_head_dim, bias=False)
-        # final output layer
-        self.out = nn.Linear(self.n_heads * self.single_head_dim, self.embed_dim) 
-    
-    def forward(self, query, key, value, mask=None):
-
-        # [batch_size, embed_size, seq_length] is query/value/key size
-
-        batch_size = key.size(0)
-        seq_length = key.size(-1)
-        
-        # query dimension can change in decoder during inference, so we cant take general seq_length
-        seq_length_query = query.size(-1)
-
-        # reshape to fit individual attention heads 
-        key = key.view(batch_size, seq_length, self.n_heads, self.single_head_dim)  #batch_size x sequence_length x n_heads x single_head_dim = (32x10x8x64)
-        query = query.view(batch_size, seq_length_query, self.n_heads, self.single_head_dim) #(32x10x8x64)
-        value = value.view(batch_size, seq_length, self.n_heads, self.single_head_dim) #(32x10x8x64)
-       
-        k = self.key_matrix(key)       # (32x10x8x64)
-        q = self.query_matrix(query)
-        v = self.value_matrix(value)
-
-        q = q.transpose(1,2)  # (batch_size, n_heads, seq_len, single_head_dim)    # (32 x 8 x 10 x 64)
-        k = k.transpose(1,2)  # (batch_size, n_heads, seq_len, single_head_dim)
-        v = v.transpose(1,2)  # (batch_size, n_heads, seq_len, single_head_dim)
-              
-        # computes attention; adjust key for matrix multiplication
-        k_adjusted = k.transpose(-1,-2)  #(batch_size, n_heads, single_head_dim, seq_ken)  #(32 x 8 x 64 x 10)
-        product = torch.matmul(q, k_adjusted)  #(32 x 8 x 10 x 64) x (32 x 8 x 64 x 10) = #(32x8x10x10)
-        # fill those positions of product matrix as (-1e20) where mask positions are 0
-        if mask is not None:
-             product = product.masked_fill(mask == 0, float("-1e20"))
-
-        #divising by square root of key dimension
-        product = product / math.sqrt(self.single_head_dim) # / sqrt(64)
-
-        #applying softmax
-        scores = F.softmax(product, dim=-1)
-        #mutiply with value matrix
-        scores = torch.matmul(scores, v)  ##(32x8x 10x 10) x (32 x 8 x 10 x 64) = (32 x 8 x 10 x 64) 
-        
-        #concatenated output
-        concat = scores.transpose(1,2).contiguous().view(batch_size, seq_length_query, self.single_head_dim*self.n_heads)  # (32x8x10x64) -> (32x10x8x64)  -> (32,10,512)
-        
-        output = self.out(concat) #(32,10,512) -> (32,10,512)
-        return output 
 
 
 class MPNNLayer(nn.Module):

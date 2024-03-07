@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from thermompnn.model.modules import get_protein_mpnn, LightAttention, MultHeadAttn
+from thermompnn.model.modules import get_protein_mpnn, LightAttention
 
 
 class TransferModelSiamese(nn.Module):

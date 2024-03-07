@@ -147,4 +147,6 @@ test.sh
 proteinmpnn/*
 
 jobs
-# local.yaml
+local.yaml
+infer.yaml
+wout.yaml

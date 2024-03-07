@@ -3,7 +3,7 @@ import torch.nn as nn
 from random import shuffle
 from copy import deepcopy
 
-from thermompnn.model.modules import get_protein_mpnn, LightAttention, MultHeadAttn
+from thermompnn.model.modules import get_protein_mpnn, LightAttention
 from thermompnn.protein_mpnn_utils import tied_featurize
 
 HIDDEN_DIM = 128

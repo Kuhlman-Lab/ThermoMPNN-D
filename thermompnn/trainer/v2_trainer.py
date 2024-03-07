@@ -14,26 +14,9 @@ class TransferModelPLv2(pl.LightningModule):
         self.model = TransferModelv2(cfg)
 
         self.cfg = cfg
-        self.learn_rate = cfg.training.learn_rate
-        self.mpnn_learn_rate = cfg.training.mpnn_learn_rate if 'mpnn_learn_rate' in cfg.training else None
-        self.lr_schedule = cfg.training.lr_schedule if 'lr_schedule' in cfg.training else False
-
         self.dev = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
         
-        # enable confidence model training
-        self.conf = cfg.training.confidence if 'confidence' in cfg.training else False
-        self.separate_heads = True if 'separate_heads' in cfg.model else False
-        self.side_chains = self.cfg.data.side_chains if 'side_chains' in self.cfg.data else False
-
-        if self.conf:  # lambda for conf model loss
-            self.conf_lambda = float(cfg.training.conf_lambda)
-        else:
-            self.conf_lambda = 0.
-        
-        if self.conf:
-            self.out = ['ddG_err', 'ddG']
-        else:
-            self.out = ['ddG']
+        self.out = ['ddG']
         self.metrics = nn.ModuleDict()
         for split in ("train_metrics", "val_metrics"):
             self.metrics[split] = nn.ModuleDict()
@@ -49,21 +32,19 @@ class TransferModelPLv2(pl.LightningModule):
     def shared_eval(self, batch, batch_idx, prefix):
 
         X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask = batch
-        if self.conf:
-            preds, pred_error = self(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs)
-            true_error = torch.abs(preds.detach() - mut_ddGs)
-            # one loss call for the whole batch
-            mse = F.mse_loss(preds, mut_ddGs) + F.mse_loss(pred_error, true_error) * self.conf_lambda
+        if self.cfg.model.subtract_mut and 'double' in self.cfg.data.mut_types:
+            # do std fwd pass
+            fwd_preds, _ = self(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask)
+            # modify seq and do reverse (mutant) pass
+            backwd_preds, _ = self(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_mutant_AAs, mut_wildtype_AAs, mut_ddGs, atom_mask)
+            preds = fwd_preds - backwd_preds
         else:
             preds, _ = self(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask)
-            mse = F.mse_loss(preds, mut_ddGs)
+        mse = F.mse_loss(preds, mut_ddGs)
 
         for out in self.out:
             for metric in self.metrics[f"{prefix}_metrics"][out].values():
-                if out == 'ddG':
-                    metric.update(torch.squeeze(preds), torch.squeeze(mut_ddGs))
-                else:
-                    metric.update(torch.squeeze(pred_error), torch.squeeze(true_error))
+                metric.update(torch.squeeze(preds), torch.squeeze(mut_ddGs))
 
             for name, metric in self.metrics[f"{prefix}_metrics"][out].items():
                 try:
@@ -89,26 +70,22 @@ class TransferModelPLv2(pl.LightningModule):
     def configure_optimizers(self):
         
         if not self.cfg.model.freeze_weights: # fully unfrozen ProteinMPNN
-            param_list = [{"params": self.model.prot_mpnn.parameters(), "lr": self.mpnn_learn_rate}]
+            param_list = [{"params": self.model.prot_mpnn.parameters(), "lr": self.cfg.training.mpnn_learn_rate}]
         else: # fully frozen MPNN
             param_list = []
 
-        if self.model.aggregation == 'mpnn' or self.model.aggregation == 'bias':
+        if self.cfg.model.aggregation == 'mpnn':
             print('Loading double mutant aggregator params for optimizer!')
             param_list.append({"params": self.model.aggregator.parameters()})
 
-        if 'dist' in self.cfg.model:
+        if self.cfg.model.dist:
             param_list.append({"params": self.model.dist_norm.parameters()})
 
-        if self.model.lightattn:  # adding light attention parameters
+        if self.cfg.model.lightattn:  # adding light attention parameters
             print('Loading light attention layer params for optimizer!')
             param_list.append({"params": self.model.light_attention.parameters()})
 
-        if self.conf or self.separate_heads:
-            print('Loading confidence/separate head model params for optimizer!')
-            param_list.append({"params": self.model.conf_model.parameters()})
-
-        if self.side_chains:
+        if self.cfg.model.side_chain_module:
             print('Loading side chain encoder module params for optimizer!')
             param_list.append({"params": self.model.side_chain_features.parameters()})
 
@@ -117,9 +94,9 @@ class TransferModelPLv2(pl.LightningModule):
             ]
         
         param_list = param_list + mlp_params
-        opt = torch.optim.AdamW(param_list, lr=self.learn_rate)
+        opt = torch.optim.AdamW(param_list, lr=self.cfg.training.learn_rate)
 
-        if self.lr_schedule: # enable additional lr scheduler conditioned on val ddG mse
+        if self.cfg.training.lr_schedule: # enable additional lr scheduler conditioned on val ddG mse
             lr_sched = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=opt, verbose=True, mode='min', factor=0.5)
             print('Enabled LR Schedule!')
             return {
