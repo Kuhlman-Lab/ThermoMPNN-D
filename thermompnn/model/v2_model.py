@@ -94,7 +94,7 @@ class TransferModelv2(nn.Module):
         if self.cfg.model.side_chain_module:
             self.side_chain_features = SideChainModule(num_positional_embeddings=16, num_rbf=16, 
                                                        node_features=128, edge_features=128, 
-                                                       top_k=30, augment_eps=0.0, encoder_layers=1, thru=True, 
+                                                       top_k=30, augment_eps=0.1, encoder_layers=1, thru=True, 
                                                        action_centers=self.cfg.model.action_centers)
 
         self.ddg_out = nn.Sequential()

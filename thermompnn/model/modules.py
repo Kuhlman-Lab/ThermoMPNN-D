@@ -107,7 +107,7 @@ class SideChainProteinFeatures(nn.Module):
         self.action_centers = action_centers
 
         self.embeddings = SideChainPositionalEncodings(num_positional_embeddings)
-        if action_centers != 'none':
+        if action_centers is not None:
             edge_in = num_positional_embeddings + num_rbf * (5 ** 2)
         else:
             edge_in = num_positional_embeddings + num_rbf * (14 ** 2)
@@ -167,7 +167,7 @@ class SideChainProteinFeatures(nn.Module):
     def _atomic_distances(self, X, E_idx, atom_mask, S=None):
         RBF_all = []
         
-        if self.action_centers != 'none':
+        if self.action_centers is not None:
             X, atom_mask = self._action_centers(X, atom_mask, S)
 
         for i in range(X.shape[-2]):

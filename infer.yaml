@@ -7,7 +7,7 @@ data:
   dataset: ptmul
   splits: [alt]
   mut_types: [double, higher]
-  side_chains: False
+  side_chains: false
 
 training:
   num_workers: 12
@@ -15,15 +15,16 @@ training:
   epochs: 100
   lr_schedule: true
   batch_size: 1
+  shuffle: True
 
 model:
   hidden_dims: [64, 32]
   subtract_mut: false
-  mutant_embedding: true
   single_target: true
+  mutant_embedding: true
   num_final_layers: 2
   freeze_weights: true
   load_pretrained: true
   lightattn: true
   aggregation: max
-  # dropout: 0.1
+  dropout: 0.2

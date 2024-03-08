@@ -19,7 +19,10 @@ def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict
     """ Pack and pad batch into torch tensors - modified to also handle mutation data"""
     alphabet = 'ACDEFGHIKLMNPQRSTVWYX'
     B = len(batch)
-    lengths = np.array([len(b['seq']) for b in batch], dtype=np.int32)  # sum of chain seq lengths
+    try:
+        lengths = np.array([len(b['seq']) for b in batch], dtype=np.int32)  # sum of chain seq lengths
+    except TypeError:
+        return None
     L_max = max([len(b['seq']) for b in batch])
     if ca_only:
         X = np.zeros([B, L_max, 1, 3])
@@ -386,9 +389,15 @@ class ddgBenchDatasetv2(torch.utils.data.Dataset):
             fname = row.PDB[:-1]
             chain = row.PDB[-1]
             old_idx = int(mut_info[1:-1])
+            wtAA, mutAA = mut_info[0], mut_info[-1]
+            ddG = float(row.DDG) * -1
             # print(f"{fname}{chain}_{wtAA}{old_idx}{mutAA}_relaxed.pdb")
             pdb_file = os.path.join(self.pdb_dir, f"{fname}{chain}_{wtAA}{old_idx}{mutAA}_relaxed.pdb")
             pdb = alt_parse_PDB(pdb_file, input_chain_list=chain, side_chains=self.side_chains)[0]
+            
+            pdb_idx = self._get_pdb_idx(mut_info, pdb_CANONICAL)  
+            assert pdb['seq'][pdb_idx] == mutAA
+            
             pdb['mutation'] = Mutation([pdb_idx], [mutAA], [wtAA], ddG * -1, row.PDB[:-1])
         
         # if needed, update wt seq to match passed mutations
