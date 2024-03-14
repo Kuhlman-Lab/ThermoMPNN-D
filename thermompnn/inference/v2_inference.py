@@ -31,7 +31,7 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
     if 'megascale' not in dataset_name:
         batch_size = 1  # larger batches will fail due to different chain IDs - fix later
     
-    loader = DataLoader(dataset, collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.get('side_chains', False)), 
+    loader = DataLoader(dataset, collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.get('side_chains', False), esm=cfg.model.get('auxiliary_embedding', '') == 'localESM'), 
                         shuffle=False, num_workers=cfg.training.get('num_workers', 8), batch_size=cfg.training.get('batch_size', 256))
 
     batches = []
@@ -39,8 +39,11 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
 
         if batch is None:
             continue
-        # X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, ddG_err = batch
-        X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask = batch
+        if cfg.model.get('auxiliary_embedding', '') == 'localESM':
+            X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask, esm_emb = batch
+            esm_emb = esm_emb.to(device)
+        else:
+            X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask = batch
 
         X = X.to(device)
         S = S.to(device)
@@ -54,9 +57,10 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
         mut_mutant_AAs = mut_mutant_AAs.to(device)
         mut_ddGs = mut_ddGs.to(device)
         atom_mask = torch.Tensor(atom_mask).to(device)
-        # ddG_err = ddG_err.to(device)
 
-        if not zero_shot:
+        if cfg.model.get('auxiliary_embedding', '') == 'localESM':
+            pred, _ = model(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask, esm_emb)
+        elif not zero_shot:
             pred, _ = model(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask)
         else:
             pred = model(X, S, mask, chain_M, residue_idx, chain_encoding_all)[-2]
@@ -65,9 +69,6 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
             if len(pred.shape) == 1:
                 pred = pred.unsqueeze(-1)
 
-        # for conf model validation
-        # mut_ddGs = torch.abs(pred - mut_ddGs)
-        # pred = _
 
         for metric in metrics["ddG"].values():
             metric.update(torch.squeeze(pred, dim=-1), torch.squeeze(mut_ddGs, dim=-1))
@@ -77,13 +78,27 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
         
         preds += list(torch.squeeze(pred, dim=-1).detach().cpu())
         ddgs += list(torch.squeeze(mut_ddGs, dim=-1).detach().cpu())
-        batches += [i for p in range(len(pred))]
+        batches += [i for p in range(len(pred))]   
     
     print('%s mutations evaluated' % (str(len(ddgs))))
     
     if keep:
         preds, ddgs = np.squeeze(preds), np.squeeze(ddgs)
-        tmp = pd.DataFrame({'ddG_pred': preds, 'ddG_true': ddgs, 'batch': batches})
+
+        if 'megascale' in dataset_name:
+            tmp = pd.DataFrame({'ddG_pred': preds, 
+            'ddG_true': ddgs, 
+            'batch': batches, 
+            'mut_type': dataset.df.mut_type, 
+            'WT_name': dataset.df.WT_name})
+        else:
+            # if 'ptmul' in dataset_name: # manually correct for subset inference df size mismatch
+                # dataset.df = dataset.df.loc[dataset.df.NMUT > 2].reset_index(drop=True)
+            tmp = pd.DataFrame({'ddG_pred': preds, 
+            'ddG_true': ddgs, 
+            'batch': batches, 
+            'mut_type': dataset.df.MUTS, 
+            'WT_name': dataset.df.PDB})
         print(tmp.head)
 
         tmp.to_csv(f'ThermoMPNN_{os.path.basename(name).removesuffix(".ckpt")}_{dataset_name}_preds.csv')

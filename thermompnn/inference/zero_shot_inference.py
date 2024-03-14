@@ -9,13 +9,14 @@ from thermompnn.inference.v2_inference import load_v2_dataset, run_prediction_ba
 # from proteinmpnn.model_utils import ProteinMPNN
 from thermompnn.model.side_chain_model import ProteinMPNN
 from thermompnn.trainer.v2_trainer import TransferModelPLv2
+from train_thermompnn import parse_cfg
 
 def inference(cfg, args):
     """Catch-all inference function for all ThermoMPNN versions"""
-
+    cfg = parse_cfg(cfg)
     # pre-initialization params
     device = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
-    ds_name = cfg.dataset
+    ds_name = cfg.data.dataset
 
     ds = load_v2_dataset(cfg)
     print('Loading model %s' % args.model)
@@ -53,12 +54,12 @@ def inference(cfg, args):
     # run ProteinMPNN logits prediction
 
     model_name = args.model
-    ds_name = cfg.dataset
+    ds_name = cfg.data.dataset
     if args.transfer:
         results = run_prediction_batched(model_name, model, ds_name, ds, [], True, zero_shot=False)
 
     else:
-        results = run_prediction_batched(model_name, model, ds_name, ds, [], True, zero_shot=True)
+        results = run_prediction_batched(model_name, model, ds_name, ds, [], True, zero_shot=True, cfg=cfg)
 
     df = pd.DataFrame(results)
     print(df)

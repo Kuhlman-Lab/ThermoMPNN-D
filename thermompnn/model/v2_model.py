@@ -92,9 +92,11 @@ class TransferModelv2(nn.Module):
             self.dist_norm = nn.LayerNorm(25)  # do normalization of raw dist values
 
         if self.cfg.model.side_chain_module:
-            self.side_chain_features = SideChainModule(num_positional_embeddings=16, num_rbf=16, 
+            rbfs = self.cfg.data.side_chain_rbfs if 'side_chain_rbfs' in self.cfg.data else 4
+            print('Side Chain RBFs:', rbfs)
+            self.side_chain_features = SideChainModule(num_positional_embeddings=16, num_rbf=rbfs, 
                                                        node_features=128, edge_features=128, 
-                                                       top_k=30, augment_eps=0.1, encoder_layers=1, thru=True, 
+                                                       top_k=30, augment_eps=0., encoder_layers=1, thru=True, 
                                                        action_centers=self.cfg.model.action_centers)
 
         self.ddg_out = nn.Sequential()
@@ -109,7 +111,7 @@ class TransferModelv2(nn.Module):
             self.ddg_out.append(nn.ReLU())
             self.ddg_out.append(nn.Linear(sz1, sz2))
             
-    def forward(self, X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask):
+    def forward(self, X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask, esm_emb=None):
         """Vectorized fwd function for arbitrary batches of mutations"""
 
         # getting ProteinMPNN embeddings (use only backbone atoms)
@@ -316,13 +318,27 @@ class TransferModelv2(nn.Module):
                 
                 if self.cfg.model.side_chain_module:
                     embeds_all.append(side_chain_embeds)
-                    
+            
+            else:
+                embeds_all = [mpnn_embed]
+            
             mpnn_embed = torch.cat(embeds_all, -1)
+            
             # vectorized indexing of the embeddings (this is very ugly but the best I can do for now)
             # unsqueeze gets mut_pos to shape (batch, 1, 1), then this is copied with expand to be shape (batch, 1, embed_dim) for gather
             mpnn_embed = torch.gather(mpnn_embed, 1, mut_positions.unsqueeze(-1).expand(mut_positions.size(0), mut_positions.size(1), mpnn_embed.size(2)))
             mpnn_embed = torch.squeeze(mpnn_embed, 1) # final shape: (batch, embed_dim)
-
+            if self.cfg.model.auxiliary_embedding == 'globalMPNN': 
+                global_embed = all_mpnn_hid[..., 0:128]
+                ge_mask = global_embed != 0.
+                global_embed = (global_embed * ge_mask).sum(dim = -2) / ge_mask.sum(dim = -2) # masked mean, output: [B, EMB]
+                mpnn_embed = torch.cat([mpnn_embed, global_embed], dim = -1)
+            
+            if self.cfg.model.auxiliary_embedding == 'localESM':
+                # do batched indexing
+                esm_emb = torch.squeeze(torch.gather(esm_emb, 1, mut_positions.unsqueeze(-1).expand(mut_positions.size(0), mut_positions.size(1), esm_emb.size(2))), 1)
+                mpnn_embed = torch.cat([mpnn_embed, esm_emb], dim = -1)            
+            
             if self.cfg.model.lightattn:
                 mpnn_embed = torch.unsqueeze(mpnn_embed, -1)  # shape for LA input: (batch, embed_dim, seq_length=1)
                 mpnn_embed = self.light_attention(mpnn_embed)  # shape for LA output: (batch, embed_dim)
@@ -356,6 +372,13 @@ class TransferModelv2(nn.Module):
         if self.cfg.model.side_chain_module:
             print('Enabling side chains!')
             EMBED_DIM += 128
+        
+        if self.cfg.model.auxiliary_embedding == 'globalMPNN':
+            print('Enabling global embeddings!')
+            EMBED_DIM += 128
+        elif self.cfg.model.auxiliary_embedding == 'localESM':
+            print('Enabling local ESM embeddings!')
+            EMBED_DIM += 320 
 
         HIDDEN_DIM = 128 # mpnn default hidden dim size
         VOCAB_DIM = 21 if not self.cfg.model.single_target else 1

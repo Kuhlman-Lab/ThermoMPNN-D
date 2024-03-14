@@ -15,7 +15,7 @@ from thermompnn.datasets.dataset_utils import Mutation, seq1_index_to_seq2_index
 
 
 def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict=None, omit_AA_dict=None, tied_positions_dict=None,
-                   pssm_dict=None, bias_by_res_dict=None, ca_only=False, side_chains=False):
+                   pssm_dict=None, bias_by_res_dict=None, ca_only=False, side_chains=False, esm=False):
     """ Pack and pad batch into torch tensors - modified to also handle mutation data"""
     alphabet = 'ACDEFGHIKLMNPQRSTVWYX'
     B = len(batch)
@@ -41,6 +41,7 @@ def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict
     chain_encoding_all = np.zeros([B, L_max], dtype=np.int32)  # 1.0 for the bits that need to be predicted
     S = np.zeros([B, L_max], dtype=np.int32)
     omit_AA_mask = np.zeros([B, L_max, len(alphabet)], dtype=np.int32)
+    
     # Build the batch
     letter_list_list = []
     visible_list_list = []
@@ -65,7 +66,9 @@ def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict
     MUT_WT_AA = np.zeros([B, N_MUT], dtype=np.int32)  # WT amino acid
     MUT_MUT_AA = np.zeros([B, N_MUT], dtype=np.int32)  # Mutant amino acid
     MUT_DDG = np.zeros([B, 1], dtype=np.float32)  # Mutation ddG (WT ddG - Mutant ddG)
-    
+    if esm:
+        ESM_embeds = np.zeros([B, L_max, 320], dtype=np.float32) # zero if padded
+
     for i, b in enumerate(batch):
         mask_dict = {}
         a = 0
@@ -265,6 +268,8 @@ def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict
             MUT_POS[i, nm] = positions[nm]
             MUT_WT_AA[i, nm] = wtAAs[nm]
             MUT_MUT_AA[i, nm] = mutAAs[nm]
+        if esm:
+            ESM_embeds[i, :lengths[i], :] = b['esm'][1:-1]
 
     isnan = np.isnan(X)
 
@@ -311,8 +316,11 @@ def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict
     MUT_DDG = torch.from_numpy(MUT_DDG).to(dtype=torch.float32, device=device)
 
     atom_mask = torch.from_numpy(np.prod(isnan, axis=-1)).to(dtype=torch.long, device=device)
-
-    return X_out, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, MUT_POS, MUT_WT_AA, MUT_MUT_AA, MUT_DDG, atom_mask
+    if esm:
+        ESM_embeds = torch.from_numpy(ESM_embeds).to(dtype=torch.float32, device=device)
+        return X_out, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, MUT_POS, MUT_WT_AA, MUT_MUT_AA, MUT_DDG, atom_mask, ESM_embeds
+    else:
+        return X_out, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, MUT_POS, MUT_WT_AA, MUT_MUT_AA, MUT_DDG, atom_mask
 
 
 class ddgBenchDatasetv2(torch.utils.data.Dataset):
@@ -338,8 +346,13 @@ class ddgBenchDatasetv2(torch.utils.data.Dataset):
             pdb_file = os.path.join(self.pdb_dir, f"{fname}.pdb")
             chain = [row.PDB[-1]]
             pdb = alt_parse_PDB(pdb_file, input_chain_list=chain, side_chains=self.side_chains)
+            
+            if self.cfg.model.auxiliary_embedding == 'localESM':
+                embed = get_esm(self.cfg.data_loc.esm_data, self.cfg.data.dataset, fname, '_esm8M.pt') # [L, EMBED]
+                pdb[0]['esm'] = embed
+            
             self.pdb_data[i] = pdb[0]
-
+            
     def __len__(self):
         return len(self.pdb_data)
 
@@ -408,6 +421,9 @@ class ddgBenchDatasetv2(torch.utils.data.Dataset):
             tmp = [p for p in pdb[sk]]
             tmp[pdb_idx] = wtAA
             pdb[sk] = ''.join(tmp)   
+
+        if self.cfg.model.auxiliary_embedding == 'localESM':
+            assert 'esm' in pdb.keys() # check that each mutation has a matched ESM embedding
 
         tmp = deepcopy(pdb)  # this is hacky but it is needed or else it overwrites all PDBs with the last data point
         return tmp
@@ -485,6 +501,10 @@ class FireProtDatasetv2(torch.utils.data.Dataset):
             wt_name = wt_name.rstrip('.pdb')
             pdb_file = os.path.join(self.cfg.data_loc.fireprot_pdbs, f"{wt_name}.pdb")
             pdb = parse_PDB(pdb_file, side_chains=self.side_chains)
+            
+            if self.cfg.model.auxiliary_embedding == 'localESM':
+                embed = get_esm(self.cfg.data_loc.esm_data, self.cfg.data.dataset, wt_name, '_esm8M.pt') # [L, EMBED]
+                pdb[0]['esm'] = embed
             self.pdb_data[wt_name] = pdb[0]
         
     def __len__(self):
@@ -512,6 +532,10 @@ class FireProtDatasetv2(torch.utils.data.Dataset):
         mut = Mutation([pdb_idx], [pdb['seq'][pdb_idx]], [row.mutation], ddG, wt_name)
         
         pdb['mutation'] = mut
+        
+        if self.cfg.model.auxiliary_embedding == 'localESM':
+            assert 'esm' in pdb.keys() # check that each mutation has a matched ESM embedding
+        
         tmp = deepcopy(pdb)  # this is hacky but it is needed or else it overwrites all PDBs with the last data point
 
         return tmp
@@ -587,7 +611,10 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
         if epi:
             self._generate_epi_dataset()
         
-        self.df = pd.concat(df_list, axis=0).sort_values(by='WT_name').reset_index(drop=True)
+        if self.split == 'test':
+            self.df = pd.concat(df_list, axis=0).reset_index(drop=True)
+        else:
+            self.df = pd.concat(df_list, axis=0).sort_values(by='WT_name').reset_index(drop=True)
 
         self._sort_dataset()
         print('Final Dataset Size: %s ' % str(self.df.shape[0]))
@@ -599,6 +626,10 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
             wt_name = wt_name.split(".pdb")[0].replace("|",":")
             pdb_file = os.path.join(self.cfg.data_loc.megascale_pdbs, f"{wt_name}.pdb")
             pdb = parse_PDB(pdb_file, side_chains=self.side_chains)
+            # TODO load each ESM embedding in its totality
+            if self.cfg.model.auxiliary_embedding == 'localESM':
+                embed = get_esm(self.cfg.data_loc.esm_data, self.cfg.data.dataset, wt_name, '_esm8M.pt') # [L, EMBED]
+                pdb[0]['esm'] = embed
             self.pdb_data[wt_name] = pdb[0]
     
     def __len__(self):
@@ -668,6 +699,8 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
         ddG = -1 * float(row.ddG_ML)
         tmp_pdb['mutation'] = Mutation(pos_list, wt_list, mut_list, ddG, row.WT_name)
         # return a SINGLE pdb object this way - not a batch of them
+        if self.cfg.model.auxiliary_embedding == 'localESM':
+            assert 'esm' in tmp_pdb.keys() # check that each mutation has a matched ESM embedding
         return tmp_pdb
 
     def _sort_dataset(self):
@@ -900,6 +933,11 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
         
         return permuted_df
 
+def get_esm(location, dataset, pdb, suffix):
+    """Return a specific ESM embedding from disk"""
+    location = os.path.join(location, dataset)
+    location = os.path.join(location, f"{pdb}_esm8M.pt")
+    return torch.load(location)
 
 def prebatch_dataset(dataset, workers=1):
     """Runs pre-batching for large (augmented) datasets"""

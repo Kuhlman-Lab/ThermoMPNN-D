@@ -50,6 +50,9 @@ def parse_cfg(cfg):
     cfg.model.load_pretrained = cfg.model.get('load_pretrained', True)
     cfg.model.lightattn = cfg.model.get('lightattn', True)
     cfg.model.mutant_embedding = cfg.model.get('mutant_embedding', False)
+    
+    # global/new featurization options
+    cfg.model.auxiliary_embedding = cfg.model.get('auxiliary_embedding', '')
 
     # double mutant model options
     cfg.model.dist = cfg.model.get('dist', False)
@@ -88,13 +91,15 @@ def train(cfg):
         model_pl = TransferModelPLv2(cfg)
         from thermompnn.datasets.v2_datasets import tied_featurize_mut
 
+        esm = 'ESM' in cfg.model.auxiliary_embedding
+
         train_loader = DataLoader(train_dataset, 
-                                    collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains), 
+                                    collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains, esm=esm), 
                                     shuffle=cfg.training.shuffle, 
                                     num_workers=cfg.training.num_workers, 
                                     batch_size=cfg.training.batch_size)
         val_loader = DataLoader(val_dataset, 
-                                    collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains), 
+                                    collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains, esm=esm), 
                                     shuffle=False, 
                                     num_workers=cfg.training.num_workers, 
                                     batch_size=cfg.training.batch_size)

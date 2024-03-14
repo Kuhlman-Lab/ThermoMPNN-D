@@ -96,7 +96,7 @@ class SideChainPositionalEncodings(nn.Module):
 
 class SideChainProteinFeatures(nn.Module):
     def __init__(self, edge_features, node_features, num_positional_embeddings=16,
-                 num_rbf=16, top_k=30, augment_eps=0., num_chain_embeddings=16, action_centers='none'):
+                 num_rbf=16, top_k=30, augment_eps=0., num_chain_embeddings=16, action_centers=None):
         """ Extract protein features """
         super(SideChainProteinFeatures, self).__init__()
         self.edge_features = edge_features
@@ -353,14 +353,11 @@ class SimpleMPNNAgg(nn.Module):
 
         self.scale = scale
         self.dropout1 = nn.Dropout(dropout)
-        # self.dropout2 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(num_hidden)
-        # self.norm2 = nn.LayerNorm(num_hidden)
 
         self.W1 = nn.Linear(num_in, num_hidden, bias=True)
         self.W2 = nn.Linear(num_hidden, num_hidden, bias=True)
         self.W3 = nn.Linear(num_hidden, num_hidden, bias=True)
-        # self.dense = PositionWiseFeedForward(num_hidden, num_hidden * 4)
 
         self.act = torch.nn.GELU()
 
@@ -380,13 +377,6 @@ class SimpleMPNNAgg(nn.Module):
         # aggregate message
         dh = torch.sum(h_message, -2) / self.scale
         h_V = self.norm1(self.dropout1(dh))
-
-        # NOTE: only enabled for EXP2.8.base, otherwise, commented out
-        # Position-wise feedforward
-        # dh = self.dense(h_V)
-        
-        # do self-update
-        # h_V = self.norm2(h_V + self.dropout2(dh))
 
         return h_V
 

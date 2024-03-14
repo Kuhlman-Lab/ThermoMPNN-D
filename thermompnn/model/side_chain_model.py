@@ -131,7 +131,7 @@ class ProteinMPNN(nn.Module):
                 h_V, h_E = layer(h_V, h_E, E_idx, X, mask, mask_attend)
 
         # TODO henry - if NFL=2, save h_V after encoder too
-        if (self.nfl != 1) and self.side_chains:
+        if (self.nfl != 1) and self.single_res_rec:
             all_hidden.append(h_V)
 
         # Concatenate sequence embeddings for autoregressive decoder
