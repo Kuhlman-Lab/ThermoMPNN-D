@@ -39,6 +39,7 @@ def parse_cfg(cfg):
     cfg.training.learn_rate = cfg.training.get('learn_rate', 0.0001)
     cfg.training.mpnn_learn_rate = cfg.training.get('mpnn_learn_rate', None)
     cfg.training.lr_schedule = cfg.training.get('lr_schedule', True)
+    cfg.training.ckpt = cfg.training.get('ckpt', None)
 
     # model config
     cfg.model = cfg.get('model', {})
@@ -50,6 +51,7 @@ def parse_cfg(cfg):
     cfg.model.load_pretrained = cfg.model.get('load_pretrained', True)
     cfg.model.lightattn = cfg.model.get('lightattn', True)
     cfg.model.mutant_embedding = cfg.model.get('mutant_embedding', False)
+    cfg.model.classifier = cfg.model.get('classifier', False)
     
     # global/new featurization options
     cfg.model.auxiliary_embedding = cfg.model.get('auxiliary_embedding', '')
@@ -88,7 +90,14 @@ def train(cfg):
 
     elif cfg.version.lower() == 'v2':
         train_dataset, val_dataset = get_v2_dataset(cfg)
+        
+
         model_pl = TransferModelPLv2(cfg)
+
+        if cfg.training.ckpt is not None:
+            print('Loading TL model from checkpoint!')
+            model_pl.model = TransferModelPLv2.load_from_checkpoint(cfg.training.ckpt, cfg=cfg, map_location='cuda').model
+
         from thermompnn.datasets.v2_datasets import tied_featurize_mut
 
         esm = 'ESM' in cfg.model.auxiliary_embedding
@@ -114,21 +123,27 @@ def train(cfg):
         raise ValueError('Invalid ThermoMPNN version! Must be v1, v2, or siamese')
     
     # additional params, logging, checkpoints for training
-    filename = cfg.name + '_{epoch:02d}_{val_ddG_spearman:.02}'
-    monitor = f'val_ddG_spearman'
+    if not cfg.model.classifier:
+        filename = cfg.name + '_{epoch:02d}_{val_ddG_spearman:.02}'
+        monitor = f'val_ddG_spearman'
+    else:
+        filename = cfg.name + '_{epoch:02d}_{val_ddG_f1:.02}'
+        monitor = f'val_ddG_f1'
+
     checkpoint_callback = ModelCheckpoint(monitor=monitor, mode='max', dirpath='checkpoints', filename=filename)
     logger = WandbLogger(project=cfg.project, name="test", log_model=False) if cfg.project is not None else None
     n_steps = 100 if cfg.version == 'v2' else 10
-        
+    
     trainer = pl.Trainer(callbacks=[checkpoint_callback], 
                         logger=logger, 
                         log_every_n_steps=n_steps, 
                         max_epochs=cfg.training.epochs,
                         accelerator=cfg.platform.accel, 
                         devices=1, 
-                        limit_train_batches=cfg.training.batch_fraction)
+                        limit_train_batches=cfg.training.batch_fraction, 
+    )
     
-    trainer.fit(model_pl, train_loader, val_loader)
+    trainer.fit(model_pl, train_loader, val_loader) #, ckpt_path=cfg.training.ckpt)
 
 
 if __name__ == "__main__":

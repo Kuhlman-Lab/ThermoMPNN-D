@@ -1257,6 +1257,7 @@ class ProteinMPNN(nn.Module):
         """ Graph-conditioned sequence model """
         device = X.device
         # Prepare node and edge embeddings
+
         E, E_idx = self.features(X, mask, residue_idx, chain_encoding_all)
         h_V = torch.zeros((E.shape[0], E.shape[1], E.shape[-1]), device=E.device)
         h_E = self.W_e(E)
@@ -1300,6 +1301,7 @@ class ProteinMPNN(nn.Module):
         # apply padding/visible residue mask
         chain_applied = chain_M.unsqueeze(-1).repeat(1, 1, order_mask_backward.shape[2])
         order_mask_backward = order_mask_backward * chain_applied
+
         mask_attend = torch.gather(order_mask_backward, 2, E_idx).unsqueeze(-1)
 
         mask_1D = mask.view([mask.size(0), mask.size(1), 1, 1])

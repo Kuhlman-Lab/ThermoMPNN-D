@@ -1,6 +1,7 @@
+import os 
 
 from thermompnn.datasets.v1_datasets import MegaScaleDataset, FireProtDataset, ComboDataset
-from thermompnn.datasets.v2_datasets import MegaScaleDatasetv2
+from thermompnn.datasets.v2_datasets import MegaScaleDatasetv2, BinderSSMDataset, BinderSSMDatasetOmar, ComboDataset, SKEMPIDataset
 from thermompnn.datasets.siamese_datasets import MegaScaleDatasetSiamese, MegaScaleDatasetSiamesePt
 
 
@@ -33,9 +34,34 @@ def get_v1_dataset(cfg):
 def get_v2_dataset(cfg):
     query = cfg.data.dataset.lower()
     splits = cfg.data.splits
-    assert query.startswith('megascale')
-    return MegaScaleDatasetv2(cfg, splits[0]), MegaScaleDatasetv2(cfg, splits[1])
-
+    if query.startswith('megascale'):
+        return MegaScaleDatasetv2(cfg, splits[0]), MegaScaleDatasetv2(cfg, splits[1])
+    elif query.startswith('binder'):
+        if query.endswith('omar'):
+            print('Loading Omar SSM Dataset')
+            csv_loc = os.path.join(cfg.data_loc.misc_data, 'binder-SSM/omar-processed-data/ssm.sc')
+            pdb_loc = os.path.join(cfg.data_loc.misc_data, 'binder-SSM/omar-processed-data/parents')
+            split_loc = os.path.join(cfg.data_loc.misc_data, 'binder-SSM/omar-processed-data/splits/ssm_splits.pkl')
+            return BinderSSMDatasetOmar(cfg, splits[0], csv_loc, pdb_loc, split_loc), BinderSSMDatasetOmar(cfg, splits[1], csv_loc, pdb_loc, split_loc)
+        else:
+            csv_loc = os.path.join(cfg.data_loc.misc_data, 'binder-SSM/Binder-SSM-Dataset.csv')
+            pdb_loc = os.path.join(cfg.data_loc.misc_data, 'binder-SSM/parents')
+            split_loc = os.path.join(cfg.data_loc.misc_data, 'binder-SSM/ssm_split_henry.pkl')
+            return BinderSSMDataset(cfg, splits[0], csv_loc, pdb_loc, split_loc), BinderSSMDataset(cfg, splits[1], csv_loc, pdb_loc, split_loc)
+    elif query.startswith('combo'):
+        print("Loading combo dataset!")
+        csv_loc = os.path.join(cfg.data_loc.misc_data, 'binder-SSM/Binder-SSM-Dataset.csv')
+        pdb_loc = os.path.join(cfg.data_loc.misc_data, 'binder-SSM/parents')
+        split_loc = os.path.join(cfg.data_loc.misc_data, 'binder-SSM/ssm_split_henry.pkl')
+        return ComboDataset(cfg, splits[0], csv_loc, pdb_loc, split_loc), ComboDataset(cfg, splits[1], csv_loc, pdb_loc, split_loc)
+    
+    elif query.startswith('skempi'):
+        print('Loading SKEMPI dataset!')
+        csv_loc = os.path.join(cfg.data_loc.misc_data, 'SKEMPIv2/SKEMPI_v2_single.csv')
+        pdb_loc = os.path.join(cfg.data_loc.misc_data, 'SKEMPIv2/PDBs')
+        return SKEMPIDataset(cfg, csv_loc, pdb_loc, splits[0]), SKEMPIDataset(cfg, csv_loc, pdb_loc, splits[1])
+    else:
+        raise ValueError("Invalid training dataset '%s' selected!" % query)
 
 def get_siamese_dataset(cfg):
     # valid_ds = ['megascale', 'megascale_pt']

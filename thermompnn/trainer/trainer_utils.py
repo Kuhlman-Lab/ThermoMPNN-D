@@ -1,11 +1,16 @@
-from torchmetrics import R2Score, MeanSquaredError, SpearmanCorrCoef
+from torchmetrics import R2Score, MeanSquaredError, SpearmanCorrCoef, F1Score
 from torchmetrics.functional import r2_score, mean_squared_error, pearson_corrcoef
 
 
-def get_metrics():
+def get_metrics(clf=False):
     """Torchmetrics collection for logging during training.
     NOTE: PearsonCorrCoef does not work correctly at this time."""
-    return {
+    if clf:
+        return {
+            "f1": F1Score(task='multiclass', num_classes=3, average='macro')
+        }
+    else:
+        return {
         "r2": R2Score(),
         "mse": MeanSquaredError(squared=True),
         "rmse": MeanSquaredError(squared=False),
