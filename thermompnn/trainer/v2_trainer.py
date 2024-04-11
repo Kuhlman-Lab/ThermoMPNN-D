@@ -23,7 +23,7 @@ class TransferModelPLv2(pl.LightningModule):
             
             for out in self.out:
                 self.metrics[split][out] = nn.ModuleDict()
-                for name, metric in get_metrics().items():
+                for name, metric in get_metrics(self.cfg.model.classifier).items():
                     self.metrics[split][out][name] = metric
 
     def forward(self, *args):
@@ -41,14 +41,28 @@ class TransferModelPLv2(pl.LightningModule):
         elif self.cfg.model.auxiliary_embedding == 'localESM':
             X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask, esm_emb = batch
             preds, _ = self(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask, esm_emb)
+
+        elif self.cfg.model.classifier:
+            X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask = batch
+            preds, _ = self(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask)
+            preds, mut_ddGs = preds.squeeze(-1), mut_ddGs.squeeze(-1)
+            mut_ddGs = mut_ddGs.to(torch.int64)
+            mse = F.cross_entropy(preds, mut_ddGs)
         else:
             X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask = batch
             preds, _ = self(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask)
-        mse = F.mse_loss(preds, mut_ddGs)
+            mse = F.mse_loss(preds, mut_ddGs)
 
         for out in self.out:
             for metric in self.metrics[f"{prefix}_metrics"][out].values():
-                metric.update(torch.squeeze(preds), torch.squeeze(mut_ddGs))
+                try:
+                    if self.cfg.model.classifier:
+                        metric.update(torch.argmax(preds, dim=-1), mut_ddGs)
+                    
+                    else:
+                        metric.update(torch.squeeze(preds), torch.squeeze(mut_ddGs))
+                except IndexError:
+                    continue
 
             for name, metric in self.metrics[f"{prefix}_metrics"][out].items():
                 try:
@@ -86,8 +100,13 @@ class TransferModelPLv2(pl.LightningModule):
             param_list.append({"params": self.model.dist_norm.parameters()})
 
         if self.cfg.model.lightattn:  # adding light attention parameters
-            print('Loading light attention layer params for optimizer!')
-            param_list.append({"params": self.model.light_attention.parameters()})
+            if self.cfg.training.ckpt is None: # skip this for fine-tuning
+                print('Loading light attention layer params for optimizer!')
+                param_list.append({"params": self.model.light_attention.parameters()})
+            else:
+                print('Loading light attention layer params for optimizer!')
+                param_list.append({"params": self.model.light_attention.parameters()})
+                # param_list.append({"params": self.model.light_attention.parameters(), "lr": 0.0})
 
         if self.cfg.model.side_chain_module:
             print('Loading side chain encoder module params for optimizer!')

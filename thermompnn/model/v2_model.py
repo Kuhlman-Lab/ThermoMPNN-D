@@ -110,7 +110,7 @@ class TransferModelv2(nn.Module):
                 self.ddg_out.append(nn.Dropout(drop))
             self.ddg_out.append(nn.ReLU())
             self.ddg_out.append(nn.Linear(sz1, sz2))
-            
+
     def forward(self, X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask, esm_emb=None):
         """Vectorized fwd function for arbitrary batches of mutations"""
 
@@ -309,7 +309,7 @@ class TransferModelv2(nn.Module):
                 embeds_all = [all_mpnn_hid, mpnn_embed]
                 if self.cfg.model.mutant_embedding:
                     mut_embed = self.prot_mpnn.W_s(mut_mutant_AAs[:, 0])
-                    embeds_all.append(mut_embed)
+                    embeds_all.append(mut_embed.unsqueeze(1).repeat(1, mpnn_embed.shape[1], 1))
                 if self.cfg.model.edges:  # add edges to input for gathering
                     # the self-edge is the edge with index ZERO for each position L
                     mpnn_edges = mpnn_edges[:, :, 0, :]  # index 2 is the K neighbors index
@@ -321,7 +321,6 @@ class TransferModelv2(nn.Module):
             
             else:
                 embeds_all = [mpnn_embed]
-            
             mpnn_embed = torch.cat(embeds_all, -1)
             
             # vectorized indexing of the embeddings (this is very ugly but the best I can do for now)
@@ -382,5 +381,8 @@ class TransferModelv2(nn.Module):
 
         HIDDEN_DIM = 128 # mpnn default hidden dim size
         VOCAB_DIM = 21 if not self.cfg.model.single_target else 1
+
+        if self.cfg.model.classifier:
+            VOCAB_DIM = 3 # one for each class
 
         return HIDDEN_DIM, EMBED_DIM, VOCAB_DIM

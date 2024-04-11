@@ -5,9 +5,9 @@ import pandas as pd
 import os
 
 from thermompnn.inference.v2_inference import load_v2_dataset, run_prediction_batched
-# from protein_mpnn_utils import ProteinMPNN
+from protein_mpnn_utils import ProteinMPNN
 # from proteinmpnn.model_utils import ProteinMPNN
-from thermompnn.model.side_chain_model import ProteinMPNN
+# from thermompnn.model.side_chain_model import ProteinMPNN
 from thermompnn.trainer.v2_trainer import TransferModelPLv2
 from train_thermompnn import parse_cfg
 
@@ -42,11 +42,11 @@ def inference(cfg, args):
                             vocab=21,
                             num_letters=21,
                             use_ipmp=args.use_ipmp,
-                            n_points=args.n_points,
-                            single_res_rec=args.single_res_rec, 
-                            side_chains=args.side_chains, 
-                            decoding_order=args.dec_order
-                            )
+                            n_points=args.n_points,)
+                            # single_res_rec=args.single_res_rec, 
+                            # side_chains=args.side_chains, 
+                            # decoding_order=args.dec_order
+                            # )
         model.load_state_dict(ckpt['model_state_dict'])
     model.to(device)
     model.eval()
@@ -56,7 +56,7 @@ def inference(cfg, args):
     model_name = args.model
     ds_name = cfg.data.dataset
     if args.transfer:
-        results = run_prediction_batched(model_name, model, ds_name, ds, [], True, zero_shot=False)
+        results = run_prediction_batched(model_name, model, ds_name, ds, [], True, zero_shot=False, cfg=cfg)
 
     else:
         results = run_prediction_batched(model_name, model, ds_name, ds, [], True, zero_shot=True, cfg=cfg)
