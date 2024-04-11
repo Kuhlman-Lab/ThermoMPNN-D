@@ -647,6 +647,8 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
         mt = row.mut_type  # only single mutations for now
         direct = row.DIRECT
         # need to retrieve file and compile mutation object
+        # mt = row.mut_type.split(':')[1]
+        
         
         # four options: single, rev, double, double-rev
         if len(mt.split(':')) > 1: # double

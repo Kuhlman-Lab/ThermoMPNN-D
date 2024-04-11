@@ -129,7 +129,7 @@ def load_v2_dataset(cfg):
     dataset = cfg.data.dataset
     split = cfg.data.splits[0]
     # common splits: test, test_cdna2, homologue-free
-
+    print(dataset, )
     if dataset == 'megascale' and split == 'test_cdna2':
         cfg.data_loc.megascale_csv = '/home/hdieckhaus/scripts/ThermoMPNN/data/cdna_mutate_everything/cdna2_test_ThermoMPNN.csv'
 

@@ -5,9 +5,9 @@ import pandas as pd
 import os
 
 from thermompnn.inference.v2_inference import load_v2_dataset, run_prediction_batched
-# from protein_mpnn_utils import ProteinMPNN
+from protein_mpnn_utils import ProteinMPNN
 # from proteinmpnn.model_utils import ProteinMPNN
-from thermompnn.model.side_chain_model import ProteinMPNN
+# from thermompnn.model.side_chain_model import ProteinMPNN
 from thermompnn.trainer.v2_trainer import TransferModelPLv2
 from train_thermompnn import parse_cfg
 
