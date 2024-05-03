@@ -1,30 +1,40 @@
 # project: ThermoMPNN_v2
-# name: EXP2.8.drop0p1
+# name: EXP2.6.ME.drm
 
 version: v2 # options: (v1, v2, siamese)
 
 data:
-  dataset: ptmul
-  splits: [alt]
-  mut_types: [double, higher]
-  side_chains: false
-
+  dataset: megascale
+  splits: [test]
+  mut_types: [double]
+  # dataset: ptmul
+  # splits: [alt]
+  # mut_types: [double]
+  # mut_types: [higher]
+  # mut_types: [double, higher]
+   
+  
 training:
   num_workers: 12
-  learn_rate: 0.0001
+  learn_rate: 0.00001
   epochs: 100
   lr_schedule: true
-  batch_size: 1
-  shuffle: True
+  # batch_size: 1
+  batch_size: 256
+  shuffle: false
 
 model:
-  hidden_dims: [64, 32]
-  subtract_mut: false
-  single_target: true
-  mutant_embedding: true
+  hidden_dims: [128, 128]
+  subtract_mut: true
+  mutant_embedding: false
+  single_target: false
   num_final_layers: 2
   freeze_weights: true
   load_pretrained: true
   lightattn: true
-  aggregation: max
-  dropout: 0.2
+  aggregation: siamese
+  proteinmpnn_dropout: 0.0
+  alpha: 1.0
+  beta: 1.0
+  edges: true
+  dropout: 0.1

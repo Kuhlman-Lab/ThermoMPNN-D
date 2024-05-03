@@ -100,6 +100,10 @@ def main(args):
                 aatype_acc = {aatype: [0., 0] for aatype in aatype_accuracy}
                 for _, batch in tqdm(enumerate(loader_test)):
                     X, S, mask, lengths, chain_M, residue_idx, mask_self, chain_encoding_all = featurize(batch, device, args.side_chains)
+                    
+                    # TODO henry check for oligomers here - keep only >1 chain cases
+                    # TODO henry check for one-sided design cases here - keep only those w/only 1 chain unmasked
+                    # TODO henry check for interface residues here - do neighbor check?
                     randn = torch.randn(chain_M.shape, device=device)
 
                     # separate (one-shot) sample fxn for single residue decoding

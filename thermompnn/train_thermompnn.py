@@ -1,6 +1,6 @@
 import sys
 import wandb
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -10,7 +10,7 @@ from functools import partial
 
 from thermompnn.parsers import get_v1_dataset, get_v2_dataset, get_siamese_dataset
 from thermompnn.trainer.v1_trainer import TransferModelPL
-from thermompnn.trainer.v2_trainer import TransferModelPLv2
+from thermompnn.trainer.v2_trainer import TransferModelPLv2, TransferModelPLv2Siamese
 from thermompnn.trainer.siamese_trainer import TransferModelSiamesePL
 
 
@@ -27,6 +27,9 @@ def parse_cfg(cfg):
     cfg.data.mut_types = cfg.data.get('mut_types', ['single'])
     cfg.data.splits = cfg.data.get('splits', ['train', 'val'])
     cfg.data.side_chains = cfg.data.get('side_chains', False)
+    cfg.data.refresh_every = cfg.data.get('refresh_every', 0)
+    cfg.data.weight = cfg.data.get('weight', False)
+    cfg.data.aug_weights = cfg.data.get('aug_weights', None)
 
     # training config
     cfg.training = cfg.get('training', {})
@@ -52,6 +55,8 @@ def parse_cfg(cfg):
     cfg.model.lightattn = cfg.model.get('lightattn', True)
     cfg.model.mutant_embedding = cfg.model.get('mutant_embedding', False)
     cfg.model.classifier = cfg.model.get('classifier', False)
+    cfg.model.alpha = cfg.model.get('alpha', 1.0)
+    cfg.model.beta = cfg.model.get('beta', 1.0)
     
     # global/new featurization options
     cfg.model.auxiliary_embedding = cfg.model.get('auxiliary_embedding', '')
@@ -90,28 +95,66 @@ def train(cfg):
 
     elif cfg.version.lower() == 'v2':
         train_dataset, val_dataset = get_v2_dataset(cfg)
-        
-
-        model_pl = TransferModelPLv2(cfg)
-
-        if cfg.training.ckpt is not None:
-            print('Loading TL model from checkpoint!')
-            model_pl.model = TransferModelPLv2.load_from_checkpoint(cfg.training.ckpt, cfg=cfg, map_location='cuda').model
-
         from thermompnn.datasets.v2_datasets import tied_featurize_mut
 
         esm = 'ESM' in cfg.model.auxiliary_embedding
 
-        train_loader = DataLoader(train_dataset, 
-                                    collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains, esm=esm), 
-                                    shuffle=cfg.training.shuffle, 
-                                    num_workers=cfg.training.num_workers, 
-                                    batch_size=cfg.training.batch_size)
-        val_loader = DataLoader(val_dataset, 
-                                    collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains, esm=esm), 
-                                    shuffle=False, 
-                                    num_workers=cfg.training.num_workers, 
-                                    batch_size=cfg.training.batch_size)
+        if cfg.data.aug_weights is not None:
+            import numpy as np
+            dv = train_dataset.df.DIRECT.values
+            weights = np.zeros_like(dv, dtype=float)
+            # "DIRECT" points are non-augmentation points
+            weights[dv] = cfg.data.aug_weights[0]
+            # second weight goes to augmentation points
+            weights[~dv] = cfg.data.aug_weights[1]
+            print(np.unique(weights))
+            sampler = WeightedRandomSampler(
+                weights=weights, 
+                num_samples=int(np.sum(dv)), # use N data points for dataset of non-augmented size N
+                replacement=False
+            )
+            train_loader = DataLoader(train_dataset, 
+                                        collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains, esm=esm), 
+                                        num_workers=cfg.training.num_workers, 
+                                        batch_size=cfg.training.batch_size, 
+                                        sampler=sampler)
+            dv = val_dataset.df.DIRECT.values
+            weights = np.zeros_like(dv, dtype=float)
+            weights[dv] = cfg.data.aug_weights[0]
+            weights[~dv] = cfg.data.aug_weights[1]
+            print(np.unique(weights), cfg.data.aug_weights)
+            val_sampler = WeightedRandomSampler(
+                weights=weights, 
+                num_samples=int(np.sum(dv)), # use N data points for dataset of non-augmented size N
+                replacement=False
+            )
+
+            val_loader = DataLoader(val_dataset, 
+                                        collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains, esm=esm), 
+                                        shuffle=False, 
+                                        num_workers=cfg.training.num_workers, 
+                                        batch_size=cfg.training.batch_size, 
+                                        sampler=val_sampler)
+        else:
+            train_loader = DataLoader(train_dataset, 
+                                        collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains, esm=esm), 
+                                        shuffle=cfg.training.shuffle, 
+                                        num_workers=cfg.training.num_workers, 
+                                        batch_size=cfg.training.batch_size)
+            val_loader = DataLoader(val_dataset, 
+                                        collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains, esm=esm), 
+                                        shuffle=False, 
+                                        num_workers=cfg.training.num_workers, 
+                                        batch_size=cfg.training.batch_size)
+
+        if cfg.model.aggregation == 'siamese':
+            model_pl = TransferModelPLv2Siamese(cfg, train_dataset, val_dataset)
+        else:
+            model_pl = TransferModelPLv2(cfg, train_dataset, val_dataset)
+
+        if cfg.training.ckpt is not None:
+            print('Loading TL model from checkpoint!')
+            model_pl.model = TransferModelPLv2.load_from_checkpoint(cfg.training.ckpt, cfg=cfg, map_location='cuda').model
 
     elif cfg.version.lower() == 'siamese':
         train_dataset, val_dataset = get_siamese_dataset(cfg)

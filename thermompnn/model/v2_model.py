@@ -79,14 +79,21 @@ class TransferModelv2(nn.Module):
         if self.cfg.model.aggregation == 'mpnn':
             # for multi-mutant model, set up learned aggregation module
             self.message_size = hid_sizes[0]  # was 128 before
-            self.aggregator = nn.Sequential([
+            self.aggregator = nn.Sequential(*[
                                             nn.ReLU(), 
                                             nn.Linear(hid_sizes[0], self.message_size), 
                                             MPNNLayer(num_hidden = self.message_size, num_in = self.message_size * 2, dropout = 0.1)
             ])
 
         if self.cfg.model.lightattn:
-            self.light_attention = LightAttention(embeddings_dim=(HIDDEN_DIM*self.cfg.model.num_final_layers + EMBED_DIM), kernel_size=1)
+            if self.multi_mutations:
+                self.light_attention = nn.Sequential()
+                # LayerNorm and project collected features down to 128-dimensions no matter what
+                self.light_attention.append(nn.LayerNorm(HIDDEN_DIM * self.cfg.model.num_final_layers + EMBED_DIM))  # do layer norm before MLP
+                self.light_attention.append(nn.Linear(HIDDEN_DIM * self.cfg.model.num_final_layers + EMBED_DIM, HIDDEN_DIM, bias=True)) # E down to 128 regardless
+                hid_sizes[0] = HIDDEN_DIM
+            else:
+                self.light_attention = LightAttention(embeddings_dim=(HIDDEN_DIM*self.cfg.model.num_final_layers + EMBED_DIM), kernel_size=1)
         
         if self.cfg.model.dist:
             self.dist_norm = nn.LayerNorm(25)  # do normalization of raw dist values
@@ -101,9 +108,6 @@ class TransferModelv2(nn.Module):
 
         self.ddg_out = nn.Sequential()
 
-        if self.multi_mutations:
-            self.ddg_out.append(nn.LayerNorm(HIDDEN_DIM * self.cfg.model.num_final_layers + EMBED_DIM))  # do layer norm before MLP
-        
         for sz1, sz2 in zip(hid_sizes, hid_sizes[1:]):
             if self.cfg.model.dropout is not None:
                 drop = float(self.cfg.model.dropout)
@@ -272,7 +276,7 @@ class TransferModelv2(nn.Module):
             else:  # non-learned aggregations
                 # run each embedding through LA / MLP layer, even if masked out
                 for n, emb in enumerate(all_mpnn_embed):
-                    emb = torch.unsqueeze(emb, -1)  # shape for LA input: (batch, embed_dim, seq_length=1)
+                    # emb = torch.unsqueeze(emb, -1)  # shape for LA input: (batch, embed_dim, seq_length=1)
                     emb = self.light_attention(emb)  # shape for LA output: (batch, embed_dim)
                     all_mpnn_embed[n] = emb  # update list of embs
 
@@ -328,7 +332,7 @@ class TransferModelv2(nn.Module):
             mpnn_embed = torch.gather(mpnn_embed, 1, mut_positions.unsqueeze(-1).expand(mut_positions.size(0), mut_positions.size(1), mpnn_embed.size(2)))
             mpnn_embed = torch.squeeze(mpnn_embed, 1) # final shape: (batch, embed_dim)
             if self.cfg.model.auxiliary_embedding == 'globalMPNN': 
-                global_embed = all_mpnn_hid[..., 0:128]
+                global_embed = all_mpnn_hid[..., :128]
                 ge_mask = global_embed != 0.
                 global_embed = (global_embed * ge_mask).sum(dim = -2) / ge_mask.sum(dim = -2) # masked mean, output: [B, EMB]
                 mpnn_embed = torch.cat([mpnn_embed, global_embed], dim = -1)
@@ -384,5 +388,184 @@ class TransferModelv2(nn.Module):
 
         if self.cfg.model.classifier:
             VOCAB_DIM = 3 # one for each class
+
+        return HIDDEN_DIM, EMBED_DIM, VOCAB_DIM
+
+
+class TransferModelv2Siamese(nn.Module):
+    """Rewritten TransferModel class using Batched datasets for faster training"""
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+
+        self.prot_mpnn = get_protein_mpnn(cfg)
+
+        HIDDEN_DIM, EMBED_DIM, VOCAB_DIM = self._set_model_dims()
+        hid_sizes = [HIDDEN_DIM * 2]
+        hid_sizes += list(self.cfg.model.hidden_dims)
+        hid_sizes += [ VOCAB_DIM ]
+
+        print('MLP HIDDEN SIZES:', hid_sizes)
+
+        if self.cfg.model.lightattn:
+            self.light_attention = nn.Sequential()
+            # LayerNorm and project collected features down to 128-dimensions no matter what
+            self.light_attention.append(nn.LayerNorm(HIDDEN_DIM * self.cfg.model.num_final_layers + EMBED_DIM))  # do layer norm before MLP
+            self.light_attention.append(nn.Linear(HIDDEN_DIM * self.cfg.model.num_final_layers + EMBED_DIM, HIDDEN_DIM, bias=True)) # E down to 128 regardless
+            self.light_attention.append(nn.ReLU())
+            if self.cfg.model.dropout is not None:
+                self.light_attention.append(nn.Dropout(float(self.cfg.model.dropout)))
+
+        self.ddg_out = nn.Sequential()
+
+        # MLP section
+        for sz1, sz2 in zip(hid_sizes[:-1], hid_sizes[1:-1]):
+            self.ddg_out.append(nn.Linear(sz1, sz2))
+            self.ddg_out.append(nn.ReLU())
+            if self.cfg.model.dropout is not None:
+                self.ddg_out.append(nn.Dropout(float(self.cfg.model.dropout)))
+
+        # final output layer (no ReLU/dropout)        
+        self.ddg_out.append(nn.Linear(hid_sizes[-2], hid_sizes[-1]))
+
+    def forward(self, X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask, esm_emb=None):
+        """Vectorized fwd function for arbitrary batches of mutations"""
+
+        # check if S matches mut_wildtype_AAs - if not, overwrite it
+        S = _check_sequence_match(S, mut_wildtype_AAs, mut_mutant_AAs, mut_positions)
+        
+        # get MPNN embeddings
+        X = torch.nan_to_num(X, nan=0.0)
+        all_mpnn_hid, wt_embed, _, mpnn_edges = self.prot_mpnn(X, S, mask, chain_M, residue_idx, chain_encoding_all)
+
+        assert self.cfg.model.num_final_layers > 0
+        all_mpnn_hid = torch.cat(all_mpnn_hid[:self.cfg.model.num_final_layers], -1) # [B, L, Embed * N]
+
+        # if enabled, get sequence embedding for mutant aa
+        if self.cfg.model.mutant_embedding:
+            # there are actually N sets of mutant sequences, so we need to run this N times
+            mut_embed_list = []
+            for m in range(mut_mutant_AAs.shape[-1]):
+                mut_embed = self.prot_mpnn.W_s(mut_mutant_AAs[:, m])
+                mut_embed_list.append(mut_embed)
+            mut_embed = torch.cat([m.unsqueeze(-1) for m in mut_embed_list], -1) # shape: (Batch, Embed, N_muts)
+
+        # if enabled, get edges between the two mutated residues
+        if self.cfg.model.edges:  # add edges to input for gathering
+            # E_idx is [B, K, L] and is a tensor of indices in X that should match neighbors of each residue
+            D_n, E_idx = _dist(X[:, :, 1, :], mask)
+
+            all_mpnn_edges = []
+            n_mutations = [a for a in range(mut_positions.shape[-1])]
+            for n_current in n_mutations:  # iterate over N-order mutations
+
+                # select the edges at the current mutated positions
+                mpnn_edges_tmp = torch.squeeze(batched_index_select(mpnn_edges, 1, mut_positions[:, n_current:n_current+1]), 1)
+                E_idx_tmp = torch.squeeze(batched_index_select(E_idx, 1, mut_positions[:, n_current:n_current+1]), 1)
+
+                # find matches for each position in the array of neighbors, grab edges, and add to list
+                edges = []
+                for b in range(E_idx_tmp.shape[0]):
+                    # iterate over all neighbors for each sample
+                    n_other = [a for a in n_mutations if a != n_current]
+                    tmp_edges = []
+                    for n_o in n_other:
+                        idx = torch.where(E_idx_tmp[b, :] == mut_positions[b, n_o:n_o+1].expand(1, E_idx_tmp.shape[-1]))
+                        if len(idx[0]) == 0: # if no edge exists, fill with empty edge for now
+                            edge = torch.full([mpnn_edges_tmp.shape[-1]], torch.nan, device=E_idx.device)
+                        else:
+                            edge = mpnn_edges_tmp[b, idx[1][0], :]
+                        tmp_edges.append(edge)
+
+                    # aggregate when multiple edges are returned (take mean of valid edges)
+                    tmp_edges = torch.stack(tmp_edges, dim=-1)
+                    edge = torch.nanmean(tmp_edges, dim=-1)
+                    edge = torch.nan_to_num(edge, nan=0)
+                    edges.append(edge)
+
+                edges_compiled = torch.stack(edges, dim=0)
+                all_mpnn_edges.append(edges_compiled)
+
+            mpnn_edges = torch.stack(all_mpnn_edges, dim=-1) # shape: (Batch, Embed, N_muts)
+
+        # gather final representation from seq and structure embeddings
+        final_embed = [] 
+        for i in range(mut_mutant_AAs.shape[-1]):
+            # gather embedding for a specific position
+            current_positions = mut_positions[:, i:i+1] # [B, 1]
+            g_struct_embed = torch.gather(all_mpnn_hid, 1, current_positions.unsqueeze(-1).expand(current_positions.size(0), current_positions.size(1), all_mpnn_hid.size(2)))
+            g_struct_embed = torch.squeeze(g_struct_embed, 1) # [B, E * nfl]
+            # add specific mutant embedding to gathered embed based on which mutation is being gathered
+            g_seq_embed = torch.gather(wt_embed, 1, current_positions.unsqueeze(-1).expand(current_positions.size(0), current_positions.size(1), wt_embed.size(2)))
+            g_seq_embed = torch.squeeze(g_seq_embed, 1) # [B, E]
+            # if mut embed enabled, subtract it from the wt embed directly to keep dims low
+            if self.cfg.model.mutant_embedding:
+                g_seq_embed = g_seq_embed - mut_embed[:, :, i] # [B, E]
+            g_embed = torch.cat([g_struct_embed, g_seq_embed], -1) # [B, E * (nfl + 1)]
+
+            # if edges enabled, concatenate them onto the end of the embedding
+            if self.cfg.model.edges:
+                g_edge_embed = mpnn_edges[:, :, i]
+                g_embed = torch.cat([g_embed, g_edge_embed], -1) # [B, E * (nfl + 2)]
+
+            final_embed.append(g_embed)  # list with length N_mutations - used to make permutations
+        final_embed = torch.stack(final_embed, dim=0) # [2, B, E x (nfl + 1)]
+
+        # do initial dim reduction
+        final_embed = self.light_attention(final_embed) # [2, B, E]
+
+        # make two copies, one with AB order and other with BA order of mutation
+        embedAB = torch.cat((final_embed[0, :, :], final_embed[1, :, :]), dim=-1)
+        embedBA = torch.cat((final_embed[1, :, :], final_embed[0, :, :]), dim=-1)
+
+        ddG_A = self.ddg_out(embedAB) # [B, 1]
+        ddG_B = self.ddg_out(embedBA) # [B, 1]
+
+        # multi-target mode has 21x21 = 441 output nodes, each corresponding to a combination of mutAA1 and mutAA2
+        if not self.cfg.model.single_target:
+            # retrieve multi-target outputs using combined mutant positioning
+            mutant_AA_idx = mut_mutant_AAs[:, 0] * 21 + mut_mutant_AAs[:, 1]
+            ddG_mutA = torch.gather(ddG_A, 1, mutant_AA_idx[:, None])
+
+            mutant_AA_idx = mut_mutant_AAs[:, 1] * 21 + mut_mutant_AAs[:, 0]
+            ddG_mutB = torch.gather(ddG_B, 1, mutant_AA_idx[:, None])
+        
+            # if enabled, subtract predicted WT stability from each
+            if self.cfg.model.subtract_mut:
+                wt_AA_idx = mut_wildtype_AAs[:, 0] * 21 + mut_wildtype_AAs[:, 1]
+                ddG_A = ddG_mutA - torch.gather(ddG_A, 1, wt_AA_idx[:, None])
+                wt_AA_idx = mut_wildtype_AAs[:, 1] * 21 + mut_wildtype_AAs[:, 0]
+                ddG_B = ddG_mutB - torch.gather(ddG_B, 1, wt_AA_idx[:, None])
+            else:
+                ddG_A = ddG_mutA
+                ddG_B = ddG_mutB
+
+        return ddG_A, ddG_B
+     
+    def _set_model_dims(self):
+        """
+        Parse various config options to properly set input, output, and vocab dimensions
+        """
+        EMBED_DIM = 128 # mpnn default seq embed size
+
+        if self.cfg.model.edges:  # add edge input size
+            EMBED_DIM += 128
+        elif self.cfg.model.dist:
+            EMBED_DIM += 25
+            
+        if self.cfg.model.side_chain_module:
+            print('Enabling side chains!')
+            EMBED_DIM += 128
+        
+        if self.cfg.model.auxiliary_embedding == 'globalMPNN':
+            print('Enabling global embeddings!')
+            EMBED_DIM += 128
+        elif self.cfg.model.auxiliary_embedding == 'localESM':
+            print('Enabling local ESM embeddings!')
+            EMBED_DIM += 320 
+
+        HIDDEN_DIM = 128 # mpnn default hidden dim size
+        VOCAB_DIM = 441 if not self.cfg.model.single_target else 1
 
         return HIDDEN_DIM, EMBED_DIM, VOCAB_DIM

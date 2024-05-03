@@ -9,7 +9,7 @@ from thermompnn.inference.v2_inference import load_v2_dataset, run_prediction_ba
 from thermompnn.inference.siamese_inference import load_siamese_dataset, run_prediction_siamese
 
 from thermompnn.trainer.v1_trainer import TransferModelPL
-from thermompnn.trainer.v2_trainer import TransferModelPLv2
+from thermompnn.trainer.v2_trainer import TransferModelPLv2, TransferModelPLv2Siamese
 from thermompnn.trainer.siamese_trainer import TransferModelSiamesePL
 
 
@@ -36,7 +36,10 @@ def inference(cfg, args):
     elif cfg.version == 'v2':
         ds = load_v2_dataset(cfg)
         print('Loading model %s' % args.model)
-        model = TransferModelPLv2.load_from_checkpoint(args.model, cfg=cfg, map_location=device).model
+        if cfg.model.aggregation == 'siamese':
+            model = TransferModelPLv2Siamese.load_from_checkpoint(args.model, cfg=cfg, map_location=device, train_dataset=ds, val_dataset=ds).model
+        else:
+            model = TransferModelPLv2.load_from_checkpoint(args.model, cfg=cfg, map_location=device, train_dataset=ds, val_dataset=ds).model
         results = run_prediction_batched(model_name, model, ds_name, ds, [], args.keep_preds, cfg=cfg)
 
     elif cfg.version == 'siamese':

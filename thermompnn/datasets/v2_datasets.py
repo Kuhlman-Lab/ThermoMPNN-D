@@ -50,16 +50,6 @@ def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict
     masked_chain_length_list_list = []
     tied_pos_list_of_lists_list = []
 
-    # for i, b in enumerate(batch):
-    #     if chain_dict != None:
-    #         masked_chains, visible_chains = chain_dict[
-    #             b['name']]  # masked_chains a list of chain letters to predict [A, D, F]
-    #     else:
-    #         masked_chains = [item[-1:] for item in list(b) if item[:10] == 'seq_chain_']
-    #         visible_chains = []
-    #     num_chains = b['num_of_chains']
-    #     all_chains = masked_chains + visible_chains
-
     # mutation info packed into batched tensors
     N_MUT = max([len(b['mutation'].position) for b in batch])  # use max mut for padding
     # N_MUT = len(batch[0]['mutation'].position) # different size depending on mutation count (single, double, etc.)
@@ -374,6 +364,7 @@ class ddgBenchDatasetv2(torch.utils.data.Dataset):
         
         if 'MUTS' in self.df.columns:
             mut_info = row.MUTS
+            # hack to run additive model on multi mutant datasets
             # try:
             #     mut_info = mut_info.split(';')[9]
             # except IndexError:
@@ -589,6 +580,19 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
 
         self.wt_names = splits[self.split]
 
+        # pre-loading wildtype structures - can avoid later file I/O for 50% of data points
+        self.side_chains = self.cfg.data.get('side_chains', False)
+        self.pdb_data = {}
+        for wt_name in tqdm(self.wt_names):
+            wt_name = wt_name.split(".pdb")[0].replace("|",":")
+            pdb_file = os.path.join(self.cfg.data_loc.megascale_pdbs, f"{wt_name}.pdb")
+            pdb = parse_PDB(pdb_file, side_chains=self.side_chains)
+            # TODO load each ESM embedding in its totality
+            if self.cfg.model.auxiliary_embedding == 'localESM':
+                embed = get_esm(self.cfg.data_loc.esm_data, self.cfg.data.dataset, wt_name, '_esm8M.pt') # [L, EMBED]
+                pdb[0]['esm'] = embed
+            self.pdb_data[wt_name] = pdb[0]
+
         # filter df for only data with structural data
         self.df = self.df.loc[self.df.WT_name.isin(self.wt_names)].reset_index(drop=True)
          
@@ -605,16 +609,17 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
             tmp = df.loc[~df.mut_type.str.contains(":") & ~df.mut_type.str.contains("wt"), :].reset_index(drop=True)
             tmp = tmp.loc[tmp.WT_name.isin(self.wt_names)].reset_index(drop=True) # filter by split
             
-            mut = tmp.mut_type.values
-            mut1 = [m.split(':')[0] for m in mut]
-            mut2 = [m.split(':')[-1] for m in mut]
-            flag = [m[0] == m[-1] for m in mut1] or [m[0] == m[-1] for m in mut2]
-            flag = ~np.array(flag)
-            tmp = tmp.loc[flag]
+            # mut = tmp.mut_type.values
+            # mut1 = [m.split(':')[0] for m in mut]
+            # mut2 = [m.split(':')[-1] for m in mut]
+            # flag = [m[0] == m[-1] for m in mut1] or [m[0] == m[-1] for m in mut2]
+            # flag = ~np.array(flag)
+            # tmp = tmp.loc[flag]
             
             double_aug = self._augment_double_mutants(tmp, c=1)
             print('Generated %s augmented double mutations' % str(double_aug.shape[0]))
             double_aug['DIRECT'] = False
+            self.tmp = tmp
             df_list.append(double_aug)
         
         epi = cfg.data.epi if 'epi' in cfg.data else False
@@ -628,19 +633,6 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
 
         self._sort_dataset()
         print('Final Dataset Size: %s ' % str(self.df.shape[0]))
-
-        # pre-loading wildtype structures - can avoid later file I/O for 50% of data points
-        self.side_chains = self.cfg.data.get('side_chains', False)
-        self.pdb_data = {}
-        for wt_name in tqdm(self.wt_names):
-            wt_name = wt_name.split(".pdb")[0].replace("|",":")
-            pdb_file = os.path.join(self.cfg.data_loc.megascale_pdbs, f"{wt_name}.pdb")
-            pdb = parse_PDB(pdb_file, side_chains=self.side_chains)
-            # TODO load each ESM embedding in its totality
-            if self.cfg.model.auxiliary_embedding == 'localESM':
-                embed = get_esm(self.cfg.data_loc.esm_data, self.cfg.data.dataset, wt_name, '_esm8M.pt') # [L, EMBED]
-                pdb[0]['esm'] = embed
-            self.pdb_data[wt_name] = pdb[0]
     
     def __len__(self):
         """Total sample count instead of batch count"""
@@ -657,9 +649,9 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
         mt = row.mut_type  # only single mutations for now
         direct = row.DIRECT
         # need to retrieve file and compile mutation object
-        # mt = row.mut_type.split(':')[1]
-        
-        
+        # mt = row.mut_type.split(':')[0] # hacky way of running additive model on multi mutant datasets
+        # mt = row.mut_type.split(':')[1] # hacky way of running additive model on multi mutant datasets
+
         # four options: single, rev, double, double-rev
         if len(mt.split(':')) > 1: # double
             wt_list, pos_list, mut_list = [], [], []
@@ -745,12 +737,24 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
             chunk = positions == pos
             pchunks[pos] = chunk
 
+        # if distance weighting is enabled, load contact maps for all pdbs
+        if self.cfg.data.get('weight', False):
+            xyz_data = {}
+            print('Using inverse distance weighting on data augmentation!')
+            for un in np.unique(wtns):
+                # get PDB xyz data and calculate LxL distance map
+                xyz = self.pdb_data[un.removesuffix('.pdb')]['coords_chain_A']['CA_chain_A']
+                xyz = torch.tensor(np.stack(xyz)) # [L, 3]
+                xyz = torch.cdist(xyz, xyz)
+                xyz_data[un] = xyz # [L, L]
+
         mutations = new_df.mut_type.values
         ddgs = new_df.ddG_ML.values
 
-        # TODO henry add oversampling here
         oversample = self.cfg.data.oversample if 'oversample' in self.cfg.data else None
-
+        if 'seed' in self.cfg.data:
+            print('Setting data augmentation seed to %s' % str(self.cfg.data.seed))
+            np.random.seed(self.cfg.data.seed)
         for p, w, m, d in tqdm(zip(positions, wtns, mutations, ddgs)):
             # pair must be in the same protein but different position, random selection
             mask = chunks[w] * ~pchunks[p]
@@ -765,9 +769,18 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
                 probs = (ddgs_paired.astype(float) > cutoff).astype(float)
                 probs = probs / np.sum(probs)
             else:
-                probs = None
+                if self.cfg.data.get('weight', False):
+                    # weight random choice to favor nearby residues
+                    pos_set = positions[mask].astype(int) - 1
+                    xyz_subset = xyz_data[w][int(p) - 1, :] # [L, ]
+                    distances = xyz_subset[pos_set]
+                    probs = 1. / (distances ** 2) # weighted by inverse of squared distance
+                    probs = probs / np.sum(probs.numpy())
+                else:
+                    probs = None
+                
             chosen = np.random.choice(np.arange(options.size), size=c, p=probs)
-            
+
             for ch in chosen:
                 new_ddg = ddgs_paired[ch]
                 new_ddg = float(new_ddg) - float(d)
@@ -945,6 +958,17 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
         
         return permuted_df
 
+    def _refresh_dataset(self):
+        # pull out non-aug data points for re-use
+        non_aug = self.df.loc[self.df['DIRECT']]
+        aug = self.df.loc[~self.df['DIRECT']]
+        aug = self._augment_double_mutants(df=self.tmp)
+        # concat and label them as before
+        print('Generated %s augmented double mutations' % str(aug.shape[0]))
+        aug['DIRECT'] = False
+        self.df = pd.concat([non_aug, aug], axis=0).sort_values(by='WT_name').reset_index(drop=True)
+        self._sort_dataset()
+        return
 
 class SKEMPIDataset(torch.utils.data.Dataset):
     

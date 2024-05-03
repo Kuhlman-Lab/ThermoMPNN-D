@@ -90,6 +90,11 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
 
         if cfg.model.get('auxiliary_embedding', '') == 'localESM':
             pred, _ = model(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask, esm_emb)
+        elif cfg.model.get('aggregation', '') == 'siamese':
+            # average both siamese network passes
+            predA, predB = model(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask)
+            # print(torch.abs(predA[0] - predB[0]))
+            pred = torch.mean(torch.cat([predA, predB], dim=-1), dim=-1)
         elif not zero_shot:
             pred, _ = model(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask)
             # pred = torch.argmax(pred, dim=-1).unsqueeze(-1).to(torch.float32) # for classifer inference compatibility
@@ -97,8 +102,8 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
             pred = model(X, S, mask, chain_M, residue_idx, chain_encoding_all)[-2]
             pred = zero_shot_convert(pred, mut_positions, mut_mutant_AAs, mut_wildtype_AAs)
             # pred = zero_shot_convert(pred, mut_positions, mut_mutant_AAs) # absolute logits are less predictive than relative logits
-            if len(pred.shape) == 1:
-                pred = pred.unsqueeze(-1)
+        if len(pred.shape) == 1:
+            pred = pred.unsqueeze(-1)
 
         for metric in metrics["ddG"].values():
             metric.update(torch.squeeze(pred, dim=-1), torch.squeeze(mut_ddGs, dim=-1))
@@ -156,7 +161,7 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
                                 'WT_name': dataset.df.PDB})
         else:
             # if 'ptmul' in dataset_name: # manually correct for subset inference df size mismatch
-                # dataset.df = dataset.df.loc[dataset.df.NMUT > 2].reset_index(drop=True)
+                # dataset.df = dataset.df.loc[dataset.df.NMUT > 9].reset_index(drop=True)
             tmp = pd.DataFrame({'ddG_pred': preds, 
             'ddG_true': ddgs, 
             'batch': batches, 
@@ -229,13 +234,13 @@ def load_v2_dataset(cfg):
         return dataset
 
     elif dataset == 's487':
-        csvf = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/SKEMPIv2/s487.csv'
-        pdbd = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/SKEMPIv2/PDBs'
+        csvf = os.path.join(cfg.data_loc.misc_data, 'SKEMPIv2/s487.csv')
+        pdbd = os.path.join(cfg.data_loc.misc_data, 'SKEMPIv2/PDBs')
         return S487Dataset(cfg, csv_file=csvf, pdb_loc=pdbd)
 
     elif dataset == 'mdm2-p53':
-        csvf = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/case_studies/MDM2-p53/mdm2_p53.tsv'
-        pdbd = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/case_studies/MDM2-p53'
+        csvf = os.path.join(cfg.data_loc.misc_data, 'case_studies/MDM2-p53/mdm2_p53.tsv')
+        pdbd = os.path.join(cfg.data_loc.misc_data, 'case_studies/MDM2-p53')
         return PPIDataset(cfg, csv_file=csvf, pdb_loc=pdbd)
 
     else:
