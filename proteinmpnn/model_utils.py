@@ -577,7 +577,7 @@ class ProteinFeatures(nn.Module):
         RBF_A_B = self._rbf(D_A_B_neighbors)
         return RBF_A_B
 
-    def _get_rbf_masked(self, A, B, E_idx, A_mask, B_mask):
+    def _get_rbf_masked(self, A, B, E_idx, A_mask, B_mask, chain_labels=None):
         D_A_B = torch.sqrt(torch.sum((A[:,:,None,:] - B[:,None,:,:])**2,-1) + 1e-6) #[B, L, L]
         D_A_B_neighbors = gather_edges(D_A_B[:,:,:,None], E_idx)[:,:,:,0] #[B,L,K]
 
@@ -594,6 +594,15 @@ class ProteinFeatures(nn.Module):
         # mask RBFs directly using paired atom mask
         # RBF_A_B = self._rbf(D_A_B_neighbors)
         RBF_A_B = self._rbf(D_A_B_neighbors) * combo.expand(combo.shape[0], combo.shape[1], combo.shape[2], self.num_rbf) # [B, L, K, N_RBF]
+        
+        # mask RBF to remove edges from neighbors in the same chain
+        if chain_labels is not None:
+            # generate intra-chain mask and apply inverse to RBF_A_B (remove any intra-chain edges)
+            ich_mask = ~(chain_labels[:, None, :] == chain_labels[:, :, None]) # [B, L_max, L_max]
+            ich_mask = torch.unsqueeze(ich_mask, -1) # [B, L_max, L_max, 1]
+            ich_mask = torch.unsqueeze(gather_edges(ich_mask, E_idx)[..., 0], -1) # [B, L_max, K, 1]
+            RBF_A_B = RBF_A_B * ich_mask # 1 if different chains, 0 if same chain
+        
         return RBF_A_B
 
     def forward(self, X, mask, residue_idx, chain_labels, mask_per_atom=None):
@@ -623,9 +632,10 @@ class ProteinFeatures(nn.Module):
             mask_per_atom[..., 4] = mask # match Cb mask to backbone mask
             for c1 in range(5):
                 for c2 in range(14):
+                    clab = None if c2 < 5 else chain_labels
                     # pass backbone mask and side chain mask to each RBF
                     RBF_all.append(self._get_rbf_masked(X[..., c1, :], X[..., c2, :], 
-                                                        E_idx, mask, mask_per_atom[..., c2]))
+                                                        E_idx, mask, mask_per_atom[..., c2], clab))
 
         RBF_all = torch.cat(tuple(RBF_all), dim=-1)
 
@@ -774,8 +784,6 @@ class ProteinMPNN(nn.Module):
 
         h_EXV_encoder_fw = mask_fw * h_EXV_encoder
 
-        # TODO henry rewrite SCA edge generation use mask_bw for filtering SC distances
-
         for layer in self.decoder_layers:
             h_ESV = cat_neighbors_nodes(h_V, h_ES, E_idx)
             h_ESV = mask_bw * h_ESV + h_EXV_encoder_fw
@@ -849,25 +857,7 @@ class ProteinMPNN(nn.Module):
         for t_ in range(N_nodes):
             
             t = decoding_order[:,t_] #[B]
-            
-            # set up mask_fw and mask_bw and reset h_EXV_encoder_fw for every position
-            # mask out t_ position and padded regions ONLY
-
-            # SRR decoding mask (all but current residue are visible) 
-            # order_mask_backward = torch.ones_list(order_mask_backward, device=device)
-            # order_mask_backward[..., ]      
-            # order_mask_backward = torch.ones_like(order_mask_backward, device=device) - torch.eye(order_mask_backward.shape[-1], device=device).unsqueeze(0).repeat(order_mask_backward.shape[0], 1, 1)
-
-            # mask_attend = torch.gather(order_mask_backward, 2, E_idx).unsqueeze(-1)
-            # mask_1D = mask.view([mask.size(0), mask.size(1), 1, 1])
-            # mask_bw = mask_1D * mask_attend
-            # mask_fw = mask_1D * (1. - mask_attend)
-            
-            # mask_fw: 1 = not yet decoded; 0 = decoded already
-            # mask_bw: 1 = decoded
-            # mask_fw = torch.ones_like(mask_fw) * mask_1D # remove padded regions
-            # mask_
-            
+                        
             chain_mask_gathered = torch.gather(chain_mask, 1, t[:,None]) #[B]
             mask_gathered = torch.gather(mask, 1, t[:,None]) #[B]
             if (mask_gathered==0).all(): #for padded or missing regions only

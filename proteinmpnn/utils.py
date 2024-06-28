@@ -324,6 +324,7 @@ def loader_pdb(item,params):
     seqid = meta['tm'][chids==chid][0,:,1]
     homo = set([ch_j for seqid_j,ch_j in zip(seqid,chids)
                 if seqid_j>params['HOMO']])
+
     # stack all chains in the assembly together
     seq,xyz,idx,masked = "",[],[],[]
     seq_list = []

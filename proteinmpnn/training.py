@@ -90,7 +90,7 @@ def main(args):
                         n_points=args.n_points,
                         side_chains=args.side_chains, 
                         single_res_rec=args.single_res_rec)
-
+    print(model)
     model.to(device)
 
     if PATH:

@@ -1,25 +1,19 @@
 import argparse
+
+import numpy as np
+import torch
+import queue
+import copy
+import random
 import os.path
+from concurrent.futures import ProcessPoolExecutor    
+from tqdm import tqdm
+from utils import worker_init_fn, get_pdbs, loader_pdb, build_training_clusters, PDB_dataset, StructureDataset, StructureLoader
+from model_utils import featurize, loss_nll, ProteinMPNN
+
 
 def main(args):
-    import json, time, os, sys, glob
-    import shutil
-    import warnings
-    import numpy as np
-    import torch
-    from torch import optim
-    from torch.utils.data import DataLoader
-    import queue
-    import copy
-    import torch.nn as nn
-    import torch.nn.functional as F
-    import random
-    import os.path
-    import subprocess
-    from concurrent.futures import ProcessPoolExecutor    
-    from tqdm import tqdm
-    from utils import worker_init_fn, get_pdbs, loader_pdb, build_training_clusters, PDB_dataset, StructureDataset, StructureLoader
-    from model_utils import featurize, loss_smoothed, loss_nll, get_std_opt, ProteinMPNN
+
 
     if args.seed is not None:
         torch.backends.cudnn.deterministic = True
@@ -83,7 +77,7 @@ def main(args):
 
         reload_c = 0
         perplexity_list = []
-        centrality_accuracy = {'all': [], 'core': [], 'surface': []}
+        centrality_accuracy = {'all': [], 'core': [], 'surface': [], 'interface-core': [], 'interface-rim': [], 'monomer': [], 'oligomer': []}
         aatype_accuracy = {aatype: [] for aatype in 'ACDEFGHIKLMNPQRSTVWY'}
         for r in range(args.num_repeats):
             if r % args.reload_data_every_n_repeats == 0:
@@ -96,14 +90,11 @@ def main(args):
             
             with torch.no_grad():
                 test_sum, test_weights = 0., 0.
-                test_acc = {'all': [0., 0], 'core': [0., 0], 'surface': [0., 0]}
+                test_acc = {'all': [0., 0], 'core': [0., 0], 'surface': [0., 0], 'interface-core': [0., 0], 'interface-rim': [0., 0], 'monomer': [0., 0], 'oligomer': [0., 0]}
                 aatype_acc = {aatype: [0., 0] for aatype in aatype_accuracy}
                 for _, batch in tqdm(enumerate(loader_test)):
                     X, S, mask, lengths, chain_M, residue_idx, mask_self, chain_encoding_all = featurize(batch, device, args.side_chains)
                     
-                    # TODO henry check for oligomers here - keep only >1 chain cases
-                    # TODO henry check for one-sided design cases here - keep only those w/only 1 chain unmasked
-                    # TODO henry check for interface residues here - do neighbor check?
                     randn = torch.randn(chain_M.shape, device=device)
 
                     # separate (one-shot) sample fxn for single residue decoding
@@ -152,6 +143,36 @@ def main(args):
                         aatype_mask = S == list('ACDEFGHIKLMNPQRSTVWY').index(aatype)
                         aatype_acc[aatype][0] += torch.sum(true_false * mask_for_loss * aatype_mask).cpu().data.numpy()
                         aatype_acc[aatype][1] += torch.sum(mask_for_loss * aatype_mask).cpu().data.numpy()
+
+                    # Mask out intra-chain neighbors
+                    icn_mask = ~(chain_encoding_all[:, None, :] == chain_encoding_all[:, :, None]) # [B, L_max, L_max]
+                    in_sphere *= (icn_mask).bool()
+                    num_neighbors = torch.sum(in_sphere, dim=-1) - 1
+
+                    # more than 10 nearby cross-chain - "Interface Core"
+                    centrality_mask = num_neighbors >= 10
+                    test_acc['interface-core'][0] += torch.sum(true_false * mask_for_loss * centrality_mask).cpu().data.numpy()
+                    test_acc['interface-core'][1] += torch.sum(mask_for_loss * centrality_mask).cpu().data.numpy()
+
+                    # more than 5 nearby cross-chain - "Interface Rim"
+                    centrality_mask = num_neighbors >= 5
+                    test_acc['interface-rim'][0] += torch.sum(true_false * mask_for_loss * centrality_mask).cpu().data.numpy()
+                    test_acc['interface-rim'][1] += torch.sum(mask_for_loss * centrality_mask).cpu().data.numpy()
+                    
+                    # stratify by monomer/oligomer state
+                    oligomer_mask = torch.zeros_like(centrality_mask)
+                    for b in range(chain_encoding_all.shape[0]): # can't do this easily w/vectorized b/c jagged arrays aren't permitted
+                        ch_unique = torch.unique(chain_encoding_all[b, :])
+                        ch_unique = ch_unique[ch_unique > 0].numel() # zeros only come from array padding, not real chains
+                        if ch_unique > 1:
+                            oligomer_mask[b, :] = 1
+
+                    oligomer_mask = oligomer_mask.bool()
+                    test_acc['oligomer'][0] += torch.sum(true_false * mask_for_loss * oligomer_mask).cpu().data.numpy()
+                    test_acc['oligomer'][1] += torch.sum(mask_for_loss * oligomer_mask).cpu().data.numpy()
+
+                    test_acc['monomer'][0] += torch.sum(true_false * mask_for_loss * ~oligomer_mask).cpu().data.numpy()
+                    test_acc['monomer'][1] += torch.sum(mask_for_loss * ~oligomer_mask).cpu().data.numpy()
                     
             test_loss = test_sum / test_weights
             test_perplexity = np.exp(test_loss)

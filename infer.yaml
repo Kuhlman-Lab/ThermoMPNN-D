@@ -4,30 +4,42 @@
 version: v2 # options: (v1, v2, siamese)
 
 data:
-  dataset: megascale
-  splits: [test]
-  mut_types: [double]
-  # dataset: ptmul
-  # splits: [alt]
+  # dataset: fireprot
+  # splits: [homologue-free]
+  # mut_types: [single]
+  # dataset: ssym
+  # splits: [dir]
+  # mut_types: [single]
+  # dataset: megascale
+  # splits: [test_cdna2]
+  # splits: [test]
+  # splits: [train]
+  # mut_types: [single]
   # mut_types: [double]
+  # mut_types: [single, double]
+  dataset: ptmul
+  splits: [alt]
+  mut_types: [double]
   # mut_types: [higher]
   # mut_types: [double, higher]
-   
-  
+  # dataset: SKEMPI_double
+  # splits: [all]
+  # epi: true
+
+
 training:
   num_workers: 12
   learn_rate: 0.00001
   epochs: 100
   lr_schedule: true
-  # batch_size: 1
-  batch_size: 256
+  batch_size: 1
   shuffle: false
 
 model:
   hidden_dims: [128, 128]
-  subtract_mut: true
-  mutant_embedding: false
-  single_target: false
+  subtract_mut: false
+  mutant_embedding: true
+  single_target: true
   num_final_layers: 2
   freeze_weights: true
   load_pretrained: true

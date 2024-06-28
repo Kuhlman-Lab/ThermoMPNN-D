@@ -16,7 +16,7 @@ for df in df_list:
 avg = pd.concat(pred_list, axis=1).mean(axis=1)
 print(avg.shape)
 
-n_muts = df.mut_type.str.count(';') + 1
+# n_muts = df.mut_type.str.count(';') + 1
 # df = df.loc[n_muts > 2]
 # avg = avg.loc[n_muts > 2]
 

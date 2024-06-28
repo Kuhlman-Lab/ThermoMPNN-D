@@ -314,7 +314,6 @@ def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict
     MUT_WT_AA = torch.from_numpy(MUT_WT_AA).to(dtype=torch.long, device=device)
     MUT_MUT_AA = torch.from_numpy(MUT_MUT_AA).to(dtype=torch.long, device=device)
     MUT_DDG = torch.from_numpy(MUT_DDG).to(dtype=torch.float32, device=device)
-
     atom_mask = torch.from_numpy(np.prod(isnan, axis=-1)).to(dtype=torch.long, device=device)
     if esm:
         ESM_embeds = torch.from_numpy(ESM_embeds).to(dtype=torch.float32, device=device)
@@ -361,12 +360,12 @@ class ddgBenchDatasetv2(torch.utils.data.Dataset):
 
         row = self.df.iloc[index]
         pdb_CANONICAL = self.pdb_data[index]
-        
+
         if 'MUTS' in self.df.columns:
             mut_info = row.MUTS
             # hack to run additive model on multi mutant datasets
             # try:
-            #     mut_info = mut_info.split(';')[9]
+            #     mut_info = mut_info.split(';')[0]
             # except IndexError:
             #     mut_info = np.nan
 
@@ -383,6 +382,45 @@ class ddgBenchDatasetv2(torch.utils.data.Dataset):
         if ('ptmul' in self.cfg.data.dataset) and ('higher' not in self.cfg.data.mut_types):
             if len(mut_info.split(';')) > 2: # skip higher order mutants if missing
                 return
+
+        # if True: # hacky cyclic prediction setup
+        #     mt1, mt2 = mut_info.split(';')[::-1] # MT2_to_DM
+        #     # mt1, mt2 = mut_info.split(';') # MT1_to_DM
+
+        #     wtAA1, pos1, mutAA1 = mt1[0], int(mt1[1:-1]) - 1, mt1[-1]
+        #     wtAA2, pos2, mutAA2 = mt2[0], int(mt2[1:-1]) - 1, mt2[-1]
+
+        #     # impute MUT1 into WT PDB data to form chimeric WT-MUT1 input
+        #     real_pdb = deepcopy(pdb_CANONICAL)
+        #     pdb_idx1 = self._get_pdb_idx(mt1, pdb_CANONICAL)
+        #     assert real_pdb['seq'][pdb_idx1] == wtAA1
+        #     pdb_idx2 = self._get_pdb_idx(mt2, pdb_CANONICAL)
+        #     assert real_pdb['seq'][pdb_idx2] == wtAA2
+
+        #     seq_keys = [k for k in real_pdb.keys() if k.startswith('seq')]
+        #     if len(seq_keys) > 2:
+        #         raise ValueError("Maximum of 2 seq fields expected in PDB, %s seq fields found instead" % str(len(seq_keys)))
+        #     for sk in seq_keys:
+        #         tmp = [p for p in real_pdb[sk]]
+        #         tmp[pdb_idx1] = mutAA1
+        #         real_pdb[sk] = ''.join(tmp)   
+        #     # assert real_pdb['seq'][pos1] == wtAA1
+        #     # seq = [ch for ch in real_pdb['seq']]
+        #     # seq[pos1] = mutAA1
+        #     # real_pdb['seq'] = ''.join(seq)
+
+        #     # seq = [ch for ch in real_pdb['seq_chain_A']]
+        #     # seq[pos1] = mutAA1
+        #     # real_pdb['seq_chain_A'] = ''.join(seq)
+
+        #     # assert real_pdb['seq'][pos1] == mutAA1
+        #     # assert real_pdb['seq'][pos2] == wtAA2
+            
+        #     # use mt2 as "real mutation" in single-mutant model
+        #     tmp_pdb = deepcopy(real_pdb)
+        #     ddG = -np.inf
+        #     tmp_pdb['mutation'] = Mutation([pdb_idx2], [wtAA2], [mutAA2], ddG, row.PDB[:-1])
+        #     return tmp_pdb
 
         if not self.rev:
             for mt in mut_info.split(';'):  # handle multiple mutations like for megascale
@@ -587,7 +625,7 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
             wt_name = wt_name.split(".pdb")[0].replace("|",":")
             pdb_file = os.path.join(self.cfg.data_loc.megascale_pdbs, f"{wt_name}.pdb")
             pdb = parse_PDB(pdb_file, side_chains=self.side_chains)
-            # TODO load each ESM embedding in its totality
+            # load each ESM embedding in its totality
             if self.cfg.model.auxiliary_embedding == 'localESM':
                 embed = get_esm(self.cfg.data_loc.esm_data, self.cfg.data.dataset, wt_name, '_esm8M.pt') # [L, EMBED]
                 pdb[0]['esm'] = embed
@@ -609,31 +647,29 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
             tmp = df.loc[~df.mut_type.str.contains(":") & ~df.mut_type.str.contains("wt"), :].reset_index(drop=True)
             tmp = tmp.loc[tmp.WT_name.isin(self.wt_names)].reset_index(drop=True) # filter by split
             
-            # mut = tmp.mut_type.values
-            # mut1 = [m.split(':')[0] for m in mut]
-            # mut2 = [m.split(':')[-1] for m in mut]
-            # flag = [m[0] == m[-1] for m in mut1] or [m[0] == m[-1] for m in mut2]
-            # flag = ~np.array(flag)
-            # tmp = tmp.loc[flag]
-            
             double_aug = self._augment_double_mutants(tmp, c=1)
             print('Generated %s augmented double mutations' % str(double_aug.shape[0]))
             double_aug['DIRECT'] = False
             self.tmp = tmp
             df_list.append(double_aug)
         
-        epi = cfg.data.epi if 'epi' in cfg.data else False
-        if epi:
-            self._generate_epi_dataset()
-        
         if self.split == 'test':
             self.df = pd.concat(df_list, axis=0).reset_index(drop=True)
         else:
             self.df = pd.concat(df_list, axis=0).sort_values(by='WT_name').reset_index(drop=True)
+        
+        epi = cfg.data.epi if 'epi' in cfg.data else False
+        if epi:
+            self._generate_epi_dataset()
 
         self._sort_dataset()
-        print('Final Dataset Size: %s ' % str(self.df.shape[0]))
-    
+        print('Final Dataset Size: %s ' % str(self.df.shape[0])) 
+        # TODO remove this later
+        print('MEAN ddG:', self.df.ddG_ML.astype(float).mean())
+        # self.df.to_csv('TMP.csv')
+        # quit()
+
+
     def __len__(self):
         """Total sample count instead of batch count"""
         return self.df.shape[0]
@@ -649,8 +685,37 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
         mt = row.mut_type  # only single mutations for now
         direct = row.DIRECT
         # need to retrieve file and compile mutation object
+        # print(mt)
         # mt = row.mut_type.split(':')[0] # hacky way of running additive model on multi mutant datasets
         # mt = row.mut_type.split(':')[1] # hacky way of running additive model on multi mutant datasets
+        # TODO configure as a real option
+        # if True: # hacky cyclic prediction setup
+        #     # mt1, mt2 = mt.split(':')[::-1] # MT2_to_DM
+        #     mt1, mt2 = mt.split(':') # MT1_to_DM
+
+        #     wtAA1, pos1, mutAA1 = mt1[0], int(mt1[1:-1]) - 1, mt1[-1]
+        #     wtAA2, pos2, mutAA2 = mt2[0], int(mt2[1:-1]) - 1, mt2[-1]
+
+        #     # impute MUT1 into WT PDB data to form chimeric WT-MUT1 input
+        #     pdb = self.pdb_data[row.WT_name.removesuffix('.pdb')]
+        #     real_pdb = deepcopy(pdb)
+        #     assert real_pdb['seq'][pos1] == wtAA1
+        #     seq = [ch for ch in real_pdb['seq']]
+        #     seq[pos1] = mutAA1
+        #     real_pdb['seq'] = ''.join(seq)
+
+        #     seq = [ch for ch in real_pdb['seq_chain_A']]
+        #     seq[pos1] = mutAA1
+        #     real_pdb['seq_chain_A'] = ''.join(seq)
+
+        #     assert real_pdb['seq'][pos1] == mutAA1
+        #     assert real_pdb['seq'][pos2] == wtAA2
+            
+        #     # use mt2 as "real mutation" in single-mutant model
+        #     tmp_pdb = deepcopy(real_pdb)
+        #     ddG = -np.inf
+        #     tmp_pdb['mutation'] = Mutation([pos2], [wtAA2], [mutAA2], ddG, row.WT_name)
+        #     return tmp_pdb
 
         # four options: single, rev, double, double-rev
         if len(mt.split(':')) > 1: # double
@@ -682,7 +747,7 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
                     assert os.path.isfile(pdb_file)  # check that file exists
                     pdb = parse_PDB(pdb_file, side_chains=self.side_chains)[0]
                     torch.save(pdb, pt_file)
-                
+
         else:
             wt_list = [mt[0]]
             mut_list = [mt[-1]]
@@ -717,10 +782,10 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
     def _augment_double_mutants(self, df, c=1):
         """Use pairs of single mutants and modeled structures to make new double mutant data points
         Rewritten to be vectorized  - can handle arbitrary multiplication ratios"""
-        
         new_df = df.copy(deep=True)
         # trim to only single mutants
         new_df = new_df.loc[~new_df.mut_type.str.contains(':')]
+
         new_df['position'] = new_df['mut_type'].str[1:-1]
         mutation_list, ddg_list = [], []
 
@@ -748,6 +813,15 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
                 xyz = torch.cdist(xyz, xyz)
                 xyz_data[un] = xyz # [L, L]
 
+        # if range weighting is enabled
+        if self.cfg.data.range is not None:
+            print('Range weighted augmentation enabled!')
+            ddg_dist = new_df.loc[~new_df.mut_type.str.contains(':')]
+            ddg_dist = ddg_dist.ddG_ML.values.astype(float)
+            all_probs = ddg_dist * -1 # linear weighting - higher ddg means lower weight
+            all_probs = all_probs - min(all_probs)
+            all_probs = all_probs ** int(self.cfg.data.range)  # range coefficient is exponential scaler
+
         mutations = new_df.mut_type.values
         ddgs = new_df.ddG_ML.values
 
@@ -769,13 +843,37 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
                 probs = (ddgs_paired.astype(float) > cutoff).astype(float)
                 probs = probs / np.sum(probs)
             else:
-                if self.cfg.data.get('weight', False):
+                if self.cfg.data.weight and self.cfg.data.range is not None:
+                    pos_set = positions[mask].astype(int) - 1
+                    xyz_subset = xyz_data[w][int(p) - 1, :] # [L, ]
+                    distances = xyz_subset[pos_set]
+                    probs1 = 1. / (distances ** 2) # weighted by inverse of squared distance
+                    probs1 = probs1.numpy() / np.sum(probs1.numpy())
+                    probs2 = all_probs[mask]
+                    probs2 = probs2 / np.sum(probs2)
+                    # just avg the probs for each data point
+                    probs = np.mean([probs1, probs2], axis=0)
+                    # plot the distributions
+                    # import matplotlib.pyplot as plt
+                    # plt.scatter(probs1, probs2, s=2)
+                    # plt.plot([0, .02], [0, .02], 'k--',)
+                    # plt.xlabel('DIST')
+                    # plt.ylabel('ddG')
+                    # # plt.hist(probs1, alpha=0.5, bins=50, label='DIST')
+                    # # plt.hist(probs2, alpha=0.5, bins=50, label='ddG')
+                    # # plt.legend()
+                    # plt.savefig('PROBS.png', dpi=300)
+                    # quit()
+                elif self.cfg.data.get('weight', False):
                     # weight random choice to favor nearby residues
                     pos_set = positions[mask].astype(int) - 1
                     xyz_subset = xyz_data[w][int(p) - 1, :] # [L, ]
                     distances = xyz_subset[pos_set]
                     probs = 1. / (distances ** 2) # weighted by inverse of squared distance
                     probs = probs / np.sum(probs.numpy())
+                elif self.cfg.data.get('range', False):
+                    probs = all_probs[mask]
+                    probs = probs / np.sum(probs)
                 else:
                     probs = None
                 
@@ -822,6 +920,7 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
         wtns = doubles.WT_name.values
         ddgs = doubles.ddG_ML.values.astype(float)
         bias_list = []
+        additive, ddg1s, ddg2s = [], [] ,[]
         singles.ddG_ML = singles.ddG_ML.astype(float)
         
         chunks, m1chunks, m2chunks = {}, {}, {}
@@ -865,11 +964,18 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
                 bias = -np.inf
             else:
                 bias = d - (ddg1 + ddg2)
+            add = ddg1 + ddg2
     
             bias_list.append(bias)
-
-        # TODO return epistasis constant in place of double mutant dataset
+            additive.append(add)
+            ddg2s.append(ddg2)
+            ddg1s.append(ddg1)
+        # TODO return epistasis term in place of double mutant ddG
+        doubles['ddG_actual'] = doubles.ddG_ML
         doubles.ddG_ML = bias_list
+        doubles['additive'] = additive
+        doubles['ddg1'] = ddg1s
+        doubles['ddg2'] = ddg2s
         doubles = doubles.loc[doubles.ddG_ML != -np.inf].reset_index(drop=True)
         self.df = doubles
         return
@@ -1036,6 +1142,86 @@ class SKEMPIDataset(torch.utils.data.Dataset):
         tmp_pdb['mutation'] = Mutation(pos_list, wt_list, mut_list, float(row.ddG), row.PDB_ID)
         return tmp_pdb
     
+
+class SKEMPIDoubleDataset(torch.utils.data.Dataset):
+    
+    def __init__(self, cfg, csv_file, pdb_loc, split='all'):
+        
+        self.cfg = cfg
+        self.split = split
+        self.df = pd.read_csv(csv_file, index_col=0)
+
+        # drop missing values
+        self.df = self.df.loc[~self.df.ddG.isna()]
+        self.df = self.df.loc[~self.df.PDB_ID.isna()]
+
+        # grab only split subset
+        if self.split != 'all':
+            split_file = os.path.join(os.path.dirname(csv_file), 'skempi_splits.pkl')
+            with open(split_file, 'rb') as fopen:
+                splits = pickle.load(fopen)
+            self.df = self.df.loc[self.df.PDB_ID.isin(splits[self.split])]
+
+        # sort by seq length for efficiency/training stability
+        self.df['length'] = self.df['SEQ1'].str.len() + self.df['SEQ2'].str.len()
+        self.df.sort_values(by=['length']).reset_index(drop=True)
+        print('Prepped Dataset Size: %s ' % str(self.df.shape[0]))
+
+        # pre-loading wildtype structures
+        self.pdb_names = self.df.PDB_ID.unique()
+        self.pdb_data = {}
+        for wt_name in tqdm(self.pdb_names):
+            wt_name = wt_name.removesuffix(".pdb")
+            # lazy loading from pre-processed (no SCA) PDBs
+            pdb = torch.load(os.path.join(pdb_loc, f"{wt_name}.pt"))
+
+            # full loading
+            # pdb_file = os.path.join(pdb_loc, f"{wt_name}.pdb")
+            # pdb = parse_PDB(pdb_file, side_chains=self.cfg.data.side_chains)[0]
+            # torch.save(pdb, os.path.join(pdb_loc, f"{wt_name}.pt"))
+            assert pdb['num_of_chains'] > 1
+            self.pdb_data[wt_name] = pdb
+    
+    def __len__(self):
+        return self.df.shape[0]
+    
+    def __getitem__(self, index):
+
+        def _get_offset(pdb, chain):
+            offset = 0
+            key_seq = f'seq_chain_{chain}'
+            for sch in [k for k in list(pdb.keys()) if k.startswith('seq_chain_')]:
+                if sch == key_seq:
+                    break
+                else:
+                    offset += len(pdb[sch])
+            return offset
+
+        row = self.df.iloc[index]
+        pdb = self.pdb_data[row.PDB_ID.removesuffix('.pdb')]
+
+        mt = row['Mutation(s)_cleaned'].split(',')
+        # mt = [mt[1]] # hacky additive model test
+        wt_list, mut_list, pos_list = [], [], []
+        for mut in mt:
+            wtAA = mut[0]
+            mutAA = mut[-1]
+            chain = mut[1]
+            pos = int(mut[2:-1]) - 1 
+            offset = _get_offset(pdb, chain)
+            pos = pos + offset
+
+            wt_list.append(wtAA)
+            mut_list.append(mutAA)
+            pos_list.append(pos)
+            assert pdb['seq'][pos] == wtAA
+            assert wtAA != mutAA
+
+        tmp_pdb = deepcopy(pdb)
+        tmp_pdb['mutation'] = Mutation(pos_list, wt_list, mut_list, float(row.ddG), row.PDB_ID)
+        return tmp_pdb
+    
+
 
 class S487Dataset(torch.utils.data.Dataset):
     
@@ -1371,20 +1557,50 @@ if __name__ == "__main__":
     # testing functionality
     from omegaconf import OmegaConf
     import sys
-    
+    from train_thermompnn import parse_cfg
+
     device = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
     cfg = OmegaConf.merge(OmegaConf.load(sys.argv[1]), OmegaConf.load(sys.argv[2]))
-    # split = sys.argv[3]
+    cfg = parse_cfg(cfg)
+
+    # seed = 333
+    # cfg.data.seed = seed
+    # # prefetch augmented dataset; save to disk for embedding use
+    # for split in ['train', 'val', 'test']:
+    #     ds = MegaScaleDatasetv2(cfg, split=split)
+    #     print(ds.df)
+    #     ds.df.to_csv(f'Prefetch_Mega_{split}_{seed}.csv')
     
-    # csvf = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/binder-SSM/Binder-SSM-Dataset.csv'
-    # pdbd = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/binder-SSM/parents'
-    # splitf = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/binder-SSM/ssm_split_henry.pkl'
-    # dataset = BinderSSMDatasetOmar(cfg, split)
+    # PTMUL df retrieval (w/aligned positions)
+    pdb_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/PTMUL/pdbs')
+    csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/PTMUL/ptmul-5fold-mutateeverything_FINAL.csv')
+    ds = ddgBenchDatasetv2(cfg=cfg, csv_fname=csv_loc, pdb_dir=pdb_loc)
+    pos1_list, pos2_list = [], []
+    seq_list = []
+    for batch in tqdm(ds):
+        if batch is not None:
+            plist = batch['mutation'].position
+            seq_list.append(batch['seq'])
+            pos1_list.append(plist[0])
+            pos2_list.append(plist[1])
+        else:
+            pos1_list.append(None)
+            pos2_list.append(None)
+            seq_list.append(None)
     
-    csvf = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/SKEMPIv2/SKEMPI_v2_single.csv'
-    pdbd = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/SKEMPIv2/PDBs'
-    dataset = SKEMPIDataset(cfg, csv_file=csvf, pdb_loc=pdbd)
+    ds.df['Pos1_Aligned'] = pos1_list
+    ds.df['Pos2_Aligned'] = pos2_list
+    ds.df['Seq_Aligned'] = seq_list
+    ds.df = ds.df.loc[ds.df['NMUT'] == 2]
+    print(ds.df.head)
+    ds.df['Pos1_Aligned'] = ds.df['Pos1_Aligned'].astype(int)
+    ds.df['Pos2_Aligned'] = ds.df['Pos2_Aligned'].astype(int)
+    ds.df.to_csv('PTMUL-aligned.csv')
     
-    prebatch_dataset(dataset=dataset, workers=cfg.training.num_workers)
+    # csvf = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/SKEMPIv2/SKEMPI_v2_single.csv'
+    # pdbd = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/SKEMPIv2/PDBs'
+    # dataset = SKEMPIDataset(cfg, csv_file=csvf, pdb_loc=pdbd)
+    
+    # prebatch_dataset(dataset=dataset, workers=cfg.training.num_workers)
     # prebatch_dataset(dataset=BinderSSMDataset(cfg, split, csv_file=csvf, pdb_loc=pdbd, split_file=splitf),
                     #  workers=cfg.training.num_workers)

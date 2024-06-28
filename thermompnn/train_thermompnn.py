@@ -30,6 +30,7 @@ def parse_cfg(cfg):
     cfg.data.refresh_every = cfg.data.get('refresh_every', 0)
     cfg.data.weight = cfg.data.get('weight', False)
     cfg.data.aug_weights = cfg.data.get('aug_weights', None)
+    cfg.data.range = cfg.data.get('range', None)
 
     # training config
     cfg.training = cfg.get('training', {})
@@ -43,6 +44,7 @@ def parse_cfg(cfg):
     cfg.training.mpnn_learn_rate = cfg.training.get('mpnn_learn_rate', None)
     cfg.training.lr_schedule = cfg.training.get('lr_schedule', True)
     cfg.training.ckpt = cfg.training.get('ckpt', None)
+    cfg.training.loss = cfg.training.get('loss', 'mse')
 
     # model config
     cfg.model = cfg.get('model', {})
@@ -107,7 +109,6 @@ def train(cfg):
             weights[dv] = cfg.data.aug_weights[0]
             # second weight goes to augmentation points
             weights[~dv] = cfg.data.aug_weights[1]
-            print(np.unique(weights))
             sampler = WeightedRandomSampler(
                 weights=weights, 
                 num_samples=int(np.sum(dv)), # use N data points for dataset of non-augmented size N
@@ -122,7 +123,7 @@ def train(cfg):
             weights = np.zeros_like(dv, dtype=float)
             weights[dv] = cfg.data.aug_weights[0]
             weights[~dv] = cfg.data.aug_weights[1]
-            print(np.unique(weights), cfg.data.aug_weights)
+            print(cfg.data.aug_weights)
             val_sampler = WeightedRandomSampler(
                 weights=weights, 
                 num_samples=int(np.sum(dv)), # use N data points for dataset of non-augmented size N
@@ -131,7 +132,6 @@ def train(cfg):
 
             val_loader = DataLoader(val_dataset, 
                                         collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains, esm=esm), 
-                                        shuffle=False, 
                                         num_workers=cfg.training.num_workers, 
                                         batch_size=cfg.training.batch_size, 
                                         sampler=val_sampler)
