@@ -6,7 +6,7 @@ from tqdm import tqdm
 import numpy as np
 import pandas as pd
 
-from thermompnn.datasets.v2_datasets import MegaScaleDatasetv2, FireProtDatasetv2, ddgBenchDatasetv2, tied_featurize_mut, BinderSSMDataset, BinderSSMDatasetOmar, SKEMPIDataset, S487Dataset, PPIDataset, SKEMPIDoubleDataset, ProteinGymDataset
+from thermompnn.datasets.v2_datasets import MegaScaleDatasetv2, FireProtDatasetv2, ddgBenchDatasetv2, tied_featurize_mut, ProteinGymDataset
 from thermompnn.inference.inference_utils import get_metrics_full
 from thermompnn.model.v2_model import batched_index_select
 

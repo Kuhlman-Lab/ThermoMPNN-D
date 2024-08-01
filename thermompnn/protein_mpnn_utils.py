@@ -1297,9 +1297,8 @@ class ProteinMPNN(nn.Module):
 
         # set all residues to be visible
         order_mask_backward = torch.ones_like(order_mask_backward)
+        # passing mut_positions tensor to mask out certain position(s) for zero-shot ProteinMPNN predictions
         if mut_positions is not None:
-            # mask out the other position!
-            # print('EPISTATIC PROTEINMPNN ENABLED')
             for b in range(order_mask_backward.shape[0]):
                 order_mask_backward[b, mut_positions[b, 0], :] = 0
                 order_mask_backward[b, mut_positions[b, 1], :] = 0

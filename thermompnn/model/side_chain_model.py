@@ -1,22 +1,11 @@
 from __future__ import print_function
-import json, time, os, sys, glob
-import shutil
-import numpy as np
 import torch
-from torch import optim
-from torch.utils.data import DataLoader
-from torch.utils.data.dataset import random_split, Subset
-import torch.utils
 
-import copy
+import torch.utils
 import torch.nn as nn
 import torch.nn.functional as F
-import random
-import itertools
 
-import sys
-
-from proteinmpnn.model_utils import ProteinFeatures, PositionWiseFeedForward, EncLayer, DecLayer, IPMPDecoder, IPMPEncoder
+from proteinmpnn.model_utils import ProteinFeatures, EncLayer, DecLayer, IPMPDecoder, IPMPEncoder
 from proteinmpnn.model_utils import gather_nodes, cat_neighbors_nodes
 
 """

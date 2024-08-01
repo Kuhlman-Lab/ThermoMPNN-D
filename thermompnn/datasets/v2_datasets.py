@@ -16,7 +16,7 @@ from thermompnn.datasets.dataset_utils import Mutation, seq1_index_to_seq2_index
 
 
 def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict=None, omit_AA_dict=None, tied_positions_dict=None,
-                   pssm_dict=None, bias_by_res_dict=None, ca_only=False, side_chains=False, esm=False):
+                   pssm_dict=None, bias_by_res_dict=None, ca_only=False, side_chains=False):
     """ Pack and pad batch into torch tensors - modified to also handle mutation data"""
     alphabet = 'ACDEFGHIKLMNPQRSTVWYX'
     B = len(batch)
@@ -57,8 +57,6 @@ def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict
     MUT_WT_AA = np.zeros([B, N_MUT], dtype=np.int32)  # WT amino acid
     MUT_MUT_AA = np.zeros([B, N_MUT], dtype=np.int32)  # Mutant amino acid
     MUT_DDG = np.zeros([B, 1], dtype=np.float32)  # Mutation ddG (WT ddG - Mutant ddG)
-    if esm:
-        ESM_embeds = np.zeros([B, L_max, 320], dtype=np.float32) # zero if padded
 
     for i, b in enumerate(batch):
         
@@ -268,8 +266,6 @@ def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict
             MUT_POS[i, nm] = positions[nm]
             MUT_WT_AA[i, nm] = wtAAs[nm]
             MUT_MUT_AA[i, nm] = mutAAs[nm]
-        if esm:
-            ESM_embeds[i, :lengths[i], :] = b['esm'][1:-1]
 
     isnan = np.isnan(X)
 
@@ -315,11 +311,7 @@ def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict
     MUT_MUT_AA = torch.from_numpy(MUT_MUT_AA).to(dtype=torch.long, device=device)
     MUT_DDG = torch.from_numpy(MUT_DDG).to(dtype=torch.float32, device=device)
     atom_mask = torch.from_numpy(np.prod(isnan, axis=-1)).to(dtype=torch.long, device=device)
-    if esm:
-        ESM_embeds = torch.from_numpy(ESM_embeds).to(dtype=torch.float32, device=device)
-        return X_out, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, MUT_POS, MUT_WT_AA, MUT_MUT_AA, MUT_DDG, atom_mask, ESM_embeds
-    else:
-        return X_out, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, MUT_POS, MUT_WT_AA, MUT_MUT_AA, MUT_DDG, atom_mask
+    return X_out, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, MUT_POS, MUT_WT_AA, MUT_MUT_AA, MUT_DDG, atom_mask
 
 
 class ddgBenchDatasetv2(torch.utils.data.Dataset):
@@ -345,10 +337,6 @@ class ddgBenchDatasetv2(torch.utils.data.Dataset):
             pdb_file = os.path.join(self.pdb_dir, f"{fname}.pdb")
             chain = [row.PDB[-1]]
             pdb = alt_parse_PDB(pdb_file, input_chain_list=chain, side_chains=self.side_chains)
-            
-            if self.cfg.model.auxiliary_embedding == 'localESM':
-                embed = get_esm(self.cfg.data_loc.esm_data, self.cfg.data.dataset, fname, '_esm8M.pt') # [L, EMBED]
-                pdb[0]['esm'] = embed
             
             self.pdb_data[i] = pdb[0]
             
@@ -464,9 +452,6 @@ class ddgBenchDatasetv2(torch.utils.data.Dataset):
             tmp[pdb_idx] = wtAA
             pdb[sk] = ''.join(tmp)   
 
-        if self.cfg.model.auxiliary_embedding == 'localESM':
-            assert 'esm' in pdb.keys() # check that each mutation has a matched ESM embedding
-
         tmp = deepcopy(pdb)  # this is hacky but it is needed or else it overwrites all PDBs with the last data point
         return tmp
 
@@ -543,10 +528,6 @@ class FireProtDatasetv2(torch.utils.data.Dataset):
             wt_name = wt_name.rstrip('.pdb')
             pdb_file = os.path.join(self.cfg.data_loc.fireprot_pdbs, f"{wt_name}.pdb")
             pdb = parse_PDB(pdb_file, side_chains=self.side_chains)
-            
-            if self.cfg.model.auxiliary_embedding == 'localESM':
-                embed = get_esm(self.cfg.data_loc.esm_data, self.cfg.data.dataset, wt_name, '_esm8M.pt') # [L, EMBED]
-                pdb[0]['esm'] = embed
             self.pdb_data[wt_name] = pdb[0]
         
     def __len__(self):
@@ -574,12 +555,7 @@ class FireProtDatasetv2(torch.utils.data.Dataset):
         mut = Mutation([pdb_idx], [pdb['seq'][pdb_idx]], [row.mutation], ddG, wt_name)
         
         pdb['mutation'] = mut
-        
-        if self.cfg.model.auxiliary_embedding == 'localESM':
-            assert 'esm' in pdb.keys() # check that each mutation has a matched ESM embedding
-        
         tmp = deepcopy(pdb)  # this is hacky but it is needed or else it overwrites all PDBs with the last data point
-
         return tmp
 
 
@@ -694,10 +670,6 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
                 wt_name = wt_name.split(".pdb")[0].replace("|",":")
                 pdb_file = os.path.join(self.cfg.data_loc.megascale_pdbs, f"{wt_name}.pdb")
                 pdb = parse_PDB(pdb_file, side_chains=self.side_chains)
-                # load each ESM embedding in its totality
-                if self.cfg.model.auxiliary_embedding == 'localESM':
-                    embed = get_esm(self.cfg.data_loc.esm_data, self.cfg.data.dataset, wt_name, '_esm8M.pt') # [L, EMBED]
-                    pdb[0]['esm'] = embed
                 self.pdb_data[wt_name] = pdb[0]
 
             # filter df for only data with structural data
@@ -732,12 +704,6 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
                 self._generate_epi_dataset()
 
         self._sort_dataset()
-        print('Final Dataset Size: %s ' % str(self.df.shape[0])) 
-        # TODO remove this later
-        print('MEAN ddG:', self.df.ddG_ML.astype(float).mean())
-        # self.df.to_csv('TMP.csv')
-        # quit()
-
 
     def __len__(self):
         """Total sample count instead of batch count"""
@@ -751,15 +717,13 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
         wt_name = row.WT_name.rstrip(".pdb").replace("|",":")
         chain = 'A'  # all Rocklin proteins have chain A, since they're AF2 models
 
-        mt = row.mut_type  # only single mutations for now
+        mt = row.mut_type
         direct = row.DIRECT
-        # need to retrieve file and compile mutation object
+
         if self.cfg.data.get('pick', None) is not None:
             pick = self.cfg.data.get('pick', None)
-            mt = row.mut_type.split(':')[pick] # hacky way of running additive model on multi mutant datasets
+            mt = row.mut_type.split(':')[pick] # hacky way of running additive model on multi mutant datasets - takes the Nth mutation only
 
-
-        # four options: single, rev, double, double-rev
         if len(mt.split(':')) > 1: # double
             wt_list, pos_list, mut_list = [], [], []
             for m in mt.split(':'):
@@ -807,11 +771,8 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
                                 
         tmp_pdb = deepcopy(pdb) # this is hacky but it is needed or else it overwrites all PDBs with the last data point
 
-        ddG = -1 * float(row.ddG_ML)
+        ddG = float(row.ddG_ML)
         tmp_pdb['mutation'] = Mutation(pos_list, wt_list, mut_list, ddG, row.WT_name)
-        # return a SINGLE pdb object this way - not a batch of them
-        if self.cfg.model.auxiliary_embedding == 'localESM':
-            assert 'esm' in tmp_pdb.keys() # check that each mutation has a matched ESM embedding
         return tmp_pdb
 
     def _sort_dataset(self):
@@ -1118,447 +1079,6 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
         self._sort_dataset()
         return
 
-class SKEMPIDataset(torch.utils.data.Dataset):
-    
-    def __init__(self, cfg, csv_file, pdb_loc, split='all'):
-        
-        self.cfg = cfg
-        self.split = split
-        self.df = pd.read_csv(csv_file, index_col=0)
-
-        # drop missing values
-        self.df = self.df.loc[~self.df.ddG.isna()]
-        self.df = self.df.loc[~self.df.PDB_ID.isna()]
-
-        # grab only split subset
-        if self.split != 'all':
-            split_file = os.path.join(os.path.dirname(csv_file), 'skempi_splits.pkl')
-            with open(split_file, 'rb') as fopen:
-                splits = pickle.load(fopen)
-            self.df = self.df.loc[self.df.PDB_ID.isin(splits[self.split])]
-
-        # sort by seq length for efficiency/training stability
-        self.df['length'] = self.df['SEQ1'].str.len() + self.df['SEQ2'].str.len()
-        self.df.sort_values(by=['length']).reset_index(drop=True)
-        print('Prepped Dataset Size: %s ' % str(self.df.shape[0]))
-
-        # pre-loading wildtype structures
-        self.pdb_names = self.df.PDB_ID.unique()
-        self.pdb_data = {}
-        for wt_name in tqdm(self.pdb_names):
-            wt_name = wt_name.removesuffix(".pdb")
-            # pdb_file = os.path.join(pdb_loc, f"{wt_name}.pdb")
-            # pdb = parse_PDB(pdb_file, side_chains=self.cfg.data.side_chains)[0]
-            # torch.save(pdb, os.path.join(pdb_loc, f"{wt_name}.pt"))
-            # print(self.pdb_names)
-            # lazy quick loading - no side chain coords
-            pdb = torch.load(os.path.join(pdb_loc, f"{wt_name}.pt"))
-            # check that both chains were successfully loaded
-            assert pdb['num_of_chains'] > 1
-            self.pdb_data[wt_name] = pdb
-    
-    def __len__(self):
-        return self.df.shape[0]
-    
-    def __getitem__(self, index):
-        
-        row = self.df.iloc[index]
-        wt_list, mut_list = [row.WT_AA], [row.MUT_AA]
-
-        # extract key chain seq and calculate offset; add this to mut pos for final pos
-        pdb = self.pdb_data[row.PDB_ID.removesuffix('.pdb')]
-        offset = 0
-        key_seq = f'seq_chain_{row.MUT_CHAIN}'
-        for sch in [k for k in list(pdb.keys()) if k.startswith('seq_chain_')]:
-            if sch == key_seq:
-                break
-            else:
-                offset += len(pdb[sch])
-
-        pos = offset + int(row.MUT_POS) - 1
-        assert pdb['seq'][pos] == row.WT_AA
-        pos_list = [pos]        
-        assert row.WT_AA != row.MUT_AA
-
-        tmp_pdb = deepcopy(pdb)
-        tmp_pdb['mutation'] = Mutation(pos_list, wt_list, mut_list, float(row.ddG), row.PDB_ID)
-        return tmp_pdb
-    
-
-class SKEMPIDoubleDataset(torch.utils.data.Dataset):
-    
-    def __init__(self, cfg, csv_file, pdb_loc, split='all'):
-        
-        self.cfg = cfg
-        self.split = split
-        self.df = pd.read_csv(csv_file, index_col=0)
-
-        # drop missing values
-        self.df = self.df.loc[~self.df.ddG.isna()]
-        self.df = self.df.loc[~self.df.PDB_ID.isna()]
-
-        # grab only split subset
-        if self.split != 'all':
-            split_file = os.path.join(os.path.dirname(csv_file), 'skempi_splits.pkl')
-            with open(split_file, 'rb') as fopen:
-                splits = pickle.load(fopen)
-            self.df = self.df.loc[self.df.PDB_ID.isin(splits[self.split])]
-
-        # sort by seq length for efficiency/training stability
-        self.df['length'] = self.df['SEQ1'].str.len() + self.df['SEQ2'].str.len()
-        self.df.sort_values(by=['length']).reset_index(drop=True)
-        print('Prepped Dataset Size: %s ' % str(self.df.shape[0]))
-
-        # pre-loading wildtype structures
-        self.pdb_names = self.df.PDB_ID.unique()
-        self.pdb_data = {}
-        for wt_name in tqdm(self.pdb_names):
-            wt_name = wt_name.removesuffix(".pdb")
-            # lazy loading from pre-processed (no SCA) PDBs
-            pdb = torch.load(os.path.join(pdb_loc, f"{wt_name}.pt"))
-
-            # full loading
-            # pdb_file = os.path.join(pdb_loc, f"{wt_name}.pdb")
-            # pdb = parse_PDB(pdb_file, side_chains=self.cfg.data.side_chains)[0]
-            # torch.save(pdb, os.path.join(pdb_loc, f"{wt_name}.pt"))
-            assert pdb['num_of_chains'] > 1
-            self.pdb_data[wt_name] = pdb
-    
-    def __len__(self):
-        return self.df.shape[0]
-    
-    def __getitem__(self, index):
-
-        def _get_offset(pdb, chain):
-            offset = 0
-            key_seq = f'seq_chain_{chain}'
-            for sch in [k for k in list(pdb.keys()) if k.startswith('seq_chain_')]:
-                if sch == key_seq:
-                    break
-                else:
-                    offset += len(pdb[sch])
-            return offset
-
-        row = self.df.iloc[index]
-        pdb = self.pdb_data[row.PDB_ID.removesuffix('.pdb')]
-
-        mt = row['Mutation(s)_cleaned'].split(',')
-        # mt = [mt[1]] # hacky additive model test
-        wt_list, mut_list, pos_list = [], [], []
-        for mut in mt:
-            wtAA = mut[0]
-            mutAA = mut[-1]
-            chain = mut[1]
-            pos = int(mut[2:-1]) - 1 
-            offset = _get_offset(pdb, chain)
-            pos = pos + offset
-
-            wt_list.append(wtAA)
-            mut_list.append(mutAA)
-            pos_list.append(pos)
-            assert pdb['seq'][pos] == wtAA
-            assert wtAA != mutAA
-
-        tmp_pdb = deepcopy(pdb)
-        tmp_pdb['mutation'] = Mutation(pos_list, wt_list, mut_list, float(row.ddG), row.PDB_ID)
-        return tmp_pdb
-    
-
-class S487Dataset(torch.utils.data.Dataset):
-    
-    def __init__(self, cfg, csv_file, pdb_loc):
-        
-        self.cfg = cfg
-        self.df = pd.read_csv(csv_file, index_col=None)
-        self.df.columns = ['MUTINFO', 'ddG_exp', 'ddG_DLAmut']
-        
-        # extract PDB, mutChain, wtAA, mutAA, pos
-        self.df[['PDB', 'CHAIN', 'MUT']] = self.df['MUTINFO'].str.split('_', expand=True)
-        self.df['WT_AA'] = self.df['MUT'].str[0:3]
-        self.df['MUT_AA'] = self.df['MUT'].str[-3:]
-        self.df['POS'] = self.df['MUT'].str[3:-3].astype(int)
-
-        self.df['WT_AA'] = self.df.apply(lambda row: seq1(row['WT_AA']), axis=1)
-        self.df['MUT_AA'] = self.df.apply(lambda row: seq1(row['MUT_AA']), axis=1)
-
-        print('Prepped Dataset Size: %s ' % str(self.df.shape[0]))
-
-        # pre-loading wildtype structures
-        self.pdb_names = self.df.PDB.unique()
-        self.pdb_data = {}
-        for wt_name in tqdm(self.pdb_names):
-            wt_name = wt_name.removesuffix(".pdb")
-            pdb_file = os.path.join(pdb_loc, f"{wt_name}.pdb")
-            pdb = parse_PDB(pdb_file, side_chains=self.cfg.data.side_chains)[0]
-            # check that multiple chains were successfully loaded
-            assert pdb['num_of_chains'] > 1
-            self.pdb_data[wt_name] = pdb
-    
-    def __len__(self):
-        return self.df.shape[0]
-    
-    def __getitem__(self, index):
-        
-        row = self.df.iloc[index]
-        wtaa = row.WT_AA
-        mutaa = row.MUT_AA
-        wt_list, mut_list = [wtaa], [mutaa]
-
-        # extract key chain seq and calculate offset; add this to mut pos for final pos
-        pdb = self.pdb_data[row.PDB.removesuffix('.pdb')]
-        offset = 0
-        key_seq = f'seq_chain_{row.CHAIN}'
-        for sch in [k for k in list(pdb.keys()) if k.startswith('seq_chain_')]:
-            if sch == key_seq:
-                break
-            else:
-                offset += len(pdb[sch])
-
-        pos = offset + int(row.POS) - 1
-        assert pdb['seq'][pos] == wtaa
-        pos_list = [pos]        
-        assert wtaa != mutaa
-
-        tmp_pdb = deepcopy(pdb)
-        tmp_pdb['mutation'] = Mutation(pos_list, wt_list, mut_list, float(row.ddG_exp), row.PDB)
-        return tmp_pdb
-    
-
-class PPIDataset(S487Dataset):
-    def __init__(self, cfg, csv_file, pdb_loc):
-        
-        self.cfg = cfg
-        self.df = pd.read_csv(csv_file, index_col=None, sep='\t')
-
-        # extract PDB, mutChain, wtAA, mutAA, pos
-        self.df[['PDB', 'CHAIN', 'MUT']] = self.df['mutationID'].str.split('_', expand=True)
-        self.df['WT_AA'] = self.df['MUT'].str[0:3]
-        self.df['MUT_AA'] = self.df['MUT'].str[-3:]
-        self.df['POS'] = self.df['MUT'].str[3:-3].astype(int)
-        
-        self.df['WT_AA'] = self.df.apply(lambda row: seq1(row['WT_AA']), axis=1)
-        self.df['MUT_AA'] = self.df.apply(lambda row: seq1(row['MUT_AA']), axis=1)
-
-        print('Prepped Dataset Size: %s ' % str(self.df.shape[0]))
-
-        # pre-loading wildtype structures
-        self.pdb_names = self.df.PDB.unique()
-        self.pdb_data = {}
-        for wt_name in tqdm(self.pdb_names):
-            wt_name = wt_name.removesuffix(".pdb")
-            pdb_file = os.path.join(pdb_loc, f"{wt_name}.pdb")
-            pdb = parse_PDB(pdb_file, side_chains=self.cfg.data.side_chains)[0]
-            # check that multiple chains were successfully loaded
-            assert pdb['num_of_chains'] > 1
-            self.pdb_data[wt_name] = pdb
-
-    def __len__(self):
-        return self.df.shape[0]
-    
-    def __getitem__(self, index):
-        
-        row = self.df.iloc[index]
-        wtaa = row.WT_AA
-        mutaa = row.MUT_AA
-        wt_list, mut_list = [wtaa], [mutaa]
-
-        # extract key chain seq and calculate offset; add this to mut pos for final pos
-        pdb = self.pdb_data[row.PDB.removesuffix('.pdb')]
-        offset = 0
-        key_seq = f'seq_chain_{row.CHAIN}'
-        for sch in [k for k in list(pdb.keys()) if k.startswith('seq_chain_')]:
-            if sch == key_seq:
-                break
-            else:
-                offset += len(pdb[sch])
-
-        pos = offset + int(row.POS) - 1
-        assert pdb['seq'][pos] == wtaa
-        pos_list = [pos]        
-        assert wtaa != mutaa
-
-        tmp_pdb = deepcopy(pdb)
-        tmp_pdb['mutation'] = Mutation(pos_list, wt_list, mut_list, float(row.ddGexp), row.PDB)
-        return tmp_pdb
-
-class BinderSSMDataset(torch.utils.data.Dataset):
-    """
-    IPD Binder SSM Dataset
-    All binders are chain A, all targets are chain B
-    """
-
-    def __init__(self, cfg, split, csv_file, pdb_loc, split_file):
-
-        self.cfg = cfg
-        self.split = split
-        
-        # load csv data
-        self.df = pd.read_csv(csv_file, index_col=0)
-
-        # load splits produced by mmseqs clustering
-        with open(split_file, 'rb') as f:
-            splits = pickle.load(f)
-
-        self.pdb_names = splits[self.split]
-
-        # filter df for only data in current split
-        self.df = self.df.loc[self.df.ssm_parent.isin(self.pdb_names)].reset_index(drop=True)
-        
-        # filter df by whether Kd is present!
-        filters = self.cfg.data.get('filters', None)
-    
-        if 'Kd' in filters:
-            print('Enabled Kd filtering')
-            cols = ['parent_kd_ub', 'parent_kd_lb', 'kd_ub', 'kd_lb']
-            for col in cols:
-                mask = np.isfinite(self.df[col]) & (self.df[col] != 0)
-                self.df = self.df.loc[mask]
-        
-        # filter df by region (interface etc) if desired
-        if 'Interface' in filters:
-            print('Enabled Interface region filtering')
-            # Region options: SUPPORT, CORE, RIM (interface) ; SURFACE, INTERIOR (non-interface)
-            mask = self.df['region'].isin(['SUPPORT', 'CORE', 'RIM'])
-            self.df = self.df.loc[mask]
-        
-        # sort by seq length for efficiency/training stability
-        self.df['total_length'] = self.df['binder_length'] + self.df['target_length']
-        self.df.sort_values(by=['total_length']).reset_index(drop=True)
-        print('Prepped Dataset Size: %s ' % str(self.df.shape[0]))
-
-        # TODO make classifer dataset if indicated
-        if self.cfg.model.classifier:
-            self.df['ddG'] = make_clf_dataset(self.df['ddG'].astype(float).values)
-
-        # pre-loading wildtype structures
-        self.pdb_data = {}
-        for wt_name in tqdm(self.pdb_names):
-            wt_name = wt_name.removesuffix(".pdb")
-            pdb_file = os.path.join(pdb_loc, f"{wt_name}.pdb")
-            pdb = parse_PDB(pdb_file, side_chains=self.cfg.data.side_chains)[0]
-            # check that both chains were successfully loaded
-            assert pdb['num_of_chains'] == 2
-            self.pdb_data[wt_name] = pdb
-        
-    def __len__(self):
-        return self.df.shape[0]
-    
-    def __getitem__(self, index):
-        """Retrieve a single mutation data point"""
-        row = self.df.iloc[index]
-        wt_list, mut_list, pos_list = [row.wtAA], [row.mutAA], [int(row.pos) - 1]
-        # mutation is in chain A, so absolute and mutation pos should be aligned already with PDB seq
-        pdb = self.pdb_data[row.ssm_parent.removesuffix('.pdb')]
-        assert pdb['seq'][int(row.pos) - 1] == row.wtAA    
-        assert row.wtAA != row.mutAA
-
-        tmp_pdb = deepcopy(pdb)
-        tmp_pdb['mutation'] = Mutation(pos_list, wt_list, mut_list, float(row.ddG), row.ssm_parent)
-        return tmp_pdb
-
-from math import log
-from Bio import PDB, SeqUtils
-
-def Kd_to_dG(Kd, T=298):
-    R = 1.987 / 1000
-    if Kd == 0:
-        return 0
-    dG = -1 * R * T * log(Kd)
-    return dG
-
-def get_pdb_seq(pdb_path):
-    pdbparser = PDB.PDBParser(QUIET=True)
-    structure = pdbparser.get_structure('chains', pdb_path)
-    chains = {chain.id: SeqUtils.seq1(''.join(residue.resname for residue in chain)) for chain in structure.get_chains()}
-
-    chains['binder_seq'] = chains.pop('A')
-    chains['target_seq'] = chains.pop('B')
-    return chains
-
-
-def make_clf_dataset(arr):
-    """Takes a numpy array of ddGs and converts it to classifier labels"""
-    # stabilizing
-    tmp = deepcopy(arr)
-    mask = arr < -0.5
-    tmp[mask] = 0
-    # neutral
-    mask = (arr >= -0.5) & (arr <= 0.5)
-    tmp[mask] = 1
-    # destabilizing
-    mask = arr > 0.5
-    tmp[mask] = 2 
-    return tmp
-
-class BinderSSMDatasetOmar(torch.utils.data.Dataset):
-    def __init__(self, cfg, split, csv_loc, pdb_loc, split_loc):
-        
-        self.cfg = cfg
-        self.split = split
-        
-        df = pd.read_csv(csv_loc, sep=' ')
-        
-        df = df.loc[~df['sketch_kd']]
-        df = df.loc[~df['is_native']]
-        lb = df['lowest_conc'] / 10
-        ub = df['highest_conc'] * 1e8
-        df['kd_center'] = np.sqrt(df['kd_lb'].clip(lb, ub) * df['kd_ub'].clip(lb, ub))
-        df['parent_kd_center'] = np.sqrt(df['parent_kd_lb'].clip(lb, ub) * df['parent_kd_ub'].clip(lb, ub))
-        
-        df['dg_center'] = df['kd_center'].apply(Kd_to_dG)
-        df['parent_dg_center'] = df['parent_kd_center'].apply(Kd_to_dG)
-        df['ddg'] = df['parent_dg_center'] - df['dg_center']
-
-        # do Kd filtering if enabled
-        if self.cfg.data.get('filter', False):
-            print('Enabled Kd filtering')
-            cols = ['parent_kd_ub', 'parent_kd_lb', 'kd_ub', 'kd_lb']
-            for col in cols:
-                mask = np.isfinite(df[col]) & (df[col] != 0)
-                df = df.loc[mask]
-
-        seqs_df = df.drop_duplicates(subset=['ssm_parent']).copy()
-        self.pdb_dir = pdb_loc
-        seqs_df['ssm_parent_path'] = pdb_loc + '/' + df['ssm_parent'] + '.pdb'
-
-        chains = seqs_df['ssm_parent_path'].apply(get_pdb_seq)
-        chains_df = chains.apply(pd.Series)
-        
-        seqs_df = seqs_df.join(chains_df)
-        df = df.merge(seqs_df[['ssm_parent', 'target', 'binder_seq', 'target_seq']], on=['ssm_parent', 'target'], how='left')
-        df[['description', 'pos', 'mut_to']] = df['description'].str.split('__', expand=True)
-        
-        self.df = df
-        with open(split_loc, 'rb') as fh:
-            splits = pickle.load(fh)  
-        
-        self.df = self.df.loc[self.df['ssm_parent'].isin(splits[split])]
-        print('Final Dataset Size: ', self.df.shape[0])
-        self.df['length'] = self.df.binder_seq.str.len() + self.df.target_seq.str.len()
-        self.df = self.df.sort_values(by=['length']).reset_index(drop=True)
-        
-        self.pdb_data = {}
-        # for wt_name in tqdm(splits[split]):
-        for wt_name in tqdm(self.df.ssm_parent.unique()):
-            wt_name = wt_name.removesuffix('.pdb')
-            pdb_file = os.path.join(pdb_loc, f"{wt_name}.pdb")
-            pdb = parse_PDB(pdb_file)[0]
-            # pt_file = os.path.join(pdb_loc, f'{wt_name}.pt')
-            # torch.save(pdb, pt_file)
-            self.pdb_data[wt_name] = pdb
-    
-    def __len__(self):
-        return self.df.shape[0]
-    
-    def __getitem__(self, index):
-        row = self.df.iloc[index]
-        pdb = self.pdb_data[row.ssm_parent]
-        pdb_idx = int(row.pos) - 1
-        mutation = Mutation(position=[pdb_idx], wildtype=[pdb['seq'][pdb_idx]], mutation=[row.mut_to], ddG=float(row.ddg), pdb=row.ssm_parent)
-        tmp = deepcopy(pdb)
-        tmp['mutation'] = mutation
-        return tmp  
-        
 
 class ProteinGymDataset(torch.utils.data.Dataset):
 
@@ -1629,13 +1149,6 @@ class ProteinGymDataset(torch.utils.data.Dataset):
         return tmp
 
 
-
-def get_esm(location, dataset, pdb, suffix):
-    """Return a specific ESM embedding from disk"""
-    location = os.path.join(location, dataset)
-    location = os.path.join(location, f"{pdb}_esm8M.pt")
-    return torch.load(location)
-
 def prebatch_dataset(dataset, workers=1):
     """Runs pre-batching for large (augmented) datasets"""
     from torch.utils.data import DataLoader
@@ -1649,54 +1162,21 @@ def prebatch_dataset(dataset, workers=1):
     
     return
 
-if __name__ == "__main__":
-    # testing functionality
-    from omegaconf import OmegaConf
-    import sys
-    from train_thermompnn import parse_cfg
+# if __name__ == "__main__":
+#     # testing functionality
+#     from omegaconf import OmegaConf
+#     import sys
+#     from train_thermompnn import parse_cfg
 
-    device = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
-    cfg = OmegaConf.merge(OmegaConf.load(sys.argv[1]), OmegaConf.load(sys.argv[2]))
-    cfg = parse_cfg(cfg)
+#     device = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
+#     cfg = OmegaConf.merge(OmegaConf.load(sys.argv[1]), OmegaConf.load(sys.argv[2]))
+#     cfg = parse_cfg(cfg)
 
-    seed = 111 # SEEDS: 111, 222, and 333 for ESM trials
-    cfg.data.seed = seed
-    # prefetch augmented dataset; save to disk for embedding use
-    for split in ['train_ptmul']: #, 'val', 'test']:
-        ds = MegaScaleDatasetv2(cfg, split=split)
-        print(ds.df)
-        ds.df.to_csv(f'Prefetch_Mega_{split}_{seed}.csv')
+#     seed = 111 # SEEDS: 111, 222, and 333 for ESM trials
+#     cfg.data.seed = seed
+#     # prefetch augmented dataset; save to disk for embedding use
+#     for split in ['train_ptmul']: #, 'val', 'test']:
+#         ds = MegaScaleDatasetv2(cfg, split=split)
+#         print(ds.df)
+#         ds.df.to_csv(f'Prefetch_Mega_{split}_{seed}.csv')
     
-    # PTMUL df retrieval (w/aligned positions)
-    # pdb_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/PTMUL/pdbs')
-    # csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/PTMUL/ptmul-5fold-mutateeverything_FINAL.csv')
-    # ds = ddgBenchDatasetv2(cfg=cfg, csv_fname=csv_loc, pdb_dir=pdb_loc)
-    # pos1_list, pos2_list = [], []
-    # seq_list = []
-    # for batch in tqdm(ds):
-    #     if batch is not None:
-    #         plist = batch['mutation'].position
-    #         seq_list.append(batch['seq'])
-    #         pos1_list.append(plist[0])
-    #         pos2_list.append(plist[1])
-    #     else:
-    #         pos1_list.append(None)
-    #         pos2_list.append(None)
-    #         seq_list.append(None)
-    
-    # ds.df['Pos1_Aligned'] = pos1_list
-    # ds.df['Pos2_Aligned'] = pos2_list
-    # ds.df['Seq_Aligned'] = seq_list
-    # ds.df = ds.df.loc[ds.df['NMUT'] == 2]
-    # print(ds.df.head)
-    # ds.df['Pos1_Aligned'] = ds.df['Pos1_Aligned'].astype(int)
-    # ds.df['Pos2_Aligned'] = ds.df['Pos2_Aligned'].astype(int)
-    # ds.df.to_csv('PTMUL-aligned.csv')
-    
-    # csvf = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/SKEMPIv2/SKEMPI_v2_single.csv'
-    # pdbd = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/SKEMPIv2/PDBs'
-    # dataset = SKEMPIDataset(cfg, csv_file=csvf, pdb_loc=pdbd)
-    
-    # prebatch_dataset(dataset=dataset, workers=cfg.training.num_workers)
-    # prebatch_dataset(dataset=BinderSSMDataset(cfg, split, csv_file=csvf, pdb_loc=pdbd, split_file=splitf),
-                    #  workers=cfg.training.num_workers)

@@ -6,17 +6,15 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 from omegaconf import OmegaConf
-from functools import partial
 
-from thermompnn.parsers import get_v1_dataset, get_v2_dataset, get_siamese_dataset
-from thermompnn.trainer.v1_trainer import TransferModelPL
+from thermompnn.parsers import get_v2_dataset
 from thermompnn.trainer.v2_trainer import TransferModelPLv2, TransferModelPLv2Siamese
-from thermompnn.trainer.siamese_trainer import TransferModelSiamesePL
+from thermompnn.datasets.v2_datasets import tied_featurize_mut
 
 
 def parse_cfg(cfg):
     """
-    Parse CFG and set default arguments as needed
+    Parse configuration scheme and set default arguments as needed
     """
 
     cfg.project = cfg.get('project', None)
@@ -29,7 +27,6 @@ def parse_cfg(cfg):
     cfg.data.side_chains = cfg.data.get('side_chains', False)
     cfg.data.refresh_every = cfg.data.get('refresh_every', 0)
     cfg.data.weight = cfg.data.get('weight', False)
-    cfg.data.aug_weights = cfg.data.get('aug_weights', None)
     cfg.data.range = cfg.data.get('range', None)
 
     # training config
@@ -44,7 +41,6 @@ def parse_cfg(cfg):
     cfg.training.mpnn_learn_rate = cfg.training.get('mpnn_learn_rate', None)
     cfg.training.lr_schedule = cfg.training.get('lr_schedule', True)
     cfg.training.ckpt = cfg.training.get('ckpt', None)
-    cfg.training.loss = cfg.training.get('loss', 'mse')
 
     # model config
     cfg.model = cfg.get('model', {})
@@ -56,13 +52,9 @@ def parse_cfg(cfg):
     cfg.model.load_pretrained = cfg.model.get('load_pretrained', True)
     cfg.model.lightattn = cfg.model.get('lightattn', True)
     cfg.model.mutant_embedding = cfg.model.get('mutant_embedding', False)
-    cfg.model.classifier = cfg.model.get('classifier', False)
     cfg.model.alpha = cfg.model.get('alpha', 1.0)
     cfg.model.beta = cfg.model.get('beta', 1.0)
     
-    # global/new featurization options
-    cfg.model.auxiliary_embedding = cfg.model.get('auxiliary_embedding', '')
-
     # double mutant model options
     cfg.model.dist = cfg.model.get('dist', False)
     cfg.model.edges = cfg.model.get('edges', False)
@@ -84,98 +76,36 @@ def train(cfg):
     if cfg.project is not None:
         wandb.init(project=cfg.project, name=cfg.name)
 
-    # pick which ThermoMPNN version to use (v1, v2, or siamese)
-    print(f'Loading ThermoMPNN version {cfg.version}')
-    if cfg.version.lower() == 'v1':
-        # initialize datasets
-        train_dataset, val_dataset = get_v1_dataset(cfg)
-        train_loader = DataLoader(train_dataset, collate_fn=lambda x: x, shuffle=True, num_workers=train_workers)
-        val_loader = DataLoader(val_dataset, collate_fn=lambda x: x, num_workers=val_workers, shuffle=False)
+    train_dataset, val_dataset = get_v2_dataset(cfg)
 
-        # load transfer learning model and trainer
-        model_pl = TransferModelPL(cfg)
+    train_loader = DataLoader(train_dataset, 
+                                collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains), 
+                                shuffle=cfg.training.shuffle, 
+                                num_workers=cfg.training.num_workers, 
+                                batch_size=cfg.training.batch_size)
+    val_loader = DataLoader(val_dataset, 
+                                collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains), 
+                                shuffle=False, 
+                                num_workers=cfg.training.num_workers, 
+                                batch_size=cfg.training.batch_size)
 
-    elif cfg.version.lower() == 'v2':
-        train_dataset, val_dataset = get_v2_dataset(cfg)
-        from thermompnn.datasets.v2_datasets import tied_featurize_mut
-
-        esm = 'ESM' in cfg.model.auxiliary_embedding
-
-        if cfg.data.aug_weights is not None:
-            import numpy as np
-            dv = train_dataset.df.DIRECT.values
-            weights = np.zeros_like(dv, dtype=float)
-            # "DIRECT" points are non-augmentation points
-            weights[dv] = cfg.data.aug_weights[0]
-            # second weight goes to augmentation points
-            weights[~dv] = cfg.data.aug_weights[1]
-            sampler = WeightedRandomSampler(
-                weights=weights, 
-                num_samples=int(np.sum(dv)), # use N data points for dataset of non-augmented size N
-                replacement=False
-            )
-            train_loader = DataLoader(train_dataset, 
-                                        collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains, esm=esm), 
-                                        num_workers=cfg.training.num_workers, 
-                                        batch_size=cfg.training.batch_size, 
-                                        sampler=sampler)
-            dv = val_dataset.df.DIRECT.values
-            weights = np.zeros_like(dv, dtype=float)
-            weights[dv] = cfg.data.aug_weights[0]
-            weights[~dv] = cfg.data.aug_weights[1]
-            print(cfg.data.aug_weights)
-            val_sampler = WeightedRandomSampler(
-                weights=weights, 
-                num_samples=int(np.sum(dv)), # use N data points for dataset of non-augmented size N
-                replacement=False
-            )
-
-            val_loader = DataLoader(val_dataset, 
-                                        collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains, esm=esm), 
-                                        num_workers=cfg.training.num_workers, 
-                                        batch_size=cfg.training.batch_size, 
-                                        sampler=val_sampler)
-        else:
-            train_loader = DataLoader(train_dataset, 
-                                        collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains, esm=esm), 
-                                        shuffle=cfg.training.shuffle, 
-                                        num_workers=cfg.training.num_workers, 
-                                        batch_size=cfg.training.batch_size)
-            val_loader = DataLoader(val_dataset, 
-                                        collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains, esm=esm), 
-                                        shuffle=False, 
-                                        num_workers=cfg.training.num_workers, 
-                                        batch_size=cfg.training.batch_size)
-
-        if cfg.model.aggregation == 'siamese':
-            model_pl = TransferModelPLv2Siamese(cfg, train_dataset, val_dataset)
-        else:
-            model_pl = TransferModelPLv2(cfg, train_dataset, val_dataset)
-
-        if cfg.training.ckpt is not None:
-            print('Loading TL model from checkpoint!')
-            model_pl.model = TransferModelPLv2.load_from_checkpoint(cfg.training.ckpt, cfg=cfg, map_location='cuda').model
-
-    elif cfg.version.lower() == 'siamese':
-        train_dataset, val_dataset = get_siamese_dataset(cfg)
-        model_pl = TransferModelSiamesePL(cfg)
-        train_loader = DataLoader(train_dataset, collate_fn=None, shuffle=True, num_workers=train_workers, batch_size=None)
-        val_loader = DataLoader(val_dataset, collate_fn=None, num_workers=val_workers, batch_size=None, shuffle=False)
-
+    if cfg.model.aggregation == 'siamese':
+        model_pl = TransferModelPLv2Siamese(cfg, train_dataset, val_dataset)
     else:
-        raise ValueError('Invalid ThermoMPNN version! Must be v1, v2, or siamese')
+        model_pl = TransferModelPLv2(cfg, train_dataset, val_dataset)
+
+    if cfg.training.ckpt is not None:
+        print('Loading TL model from checkpoint!')
+        model_pl.model = TransferModelPLv2.load_from_checkpoint(cfg.training.ckpt, cfg=cfg, map_location='cuda').model
     
     # additional params, logging, checkpoints for training
-    if not cfg.model.classifier:
-        filename = cfg.name + '_{epoch:02d}_{val_ddG_spearman:.02}'
-        monitor = f'val_ddG_spearman'
-    else:
-        filename = cfg.name + '_{epoch:02d}_{val_ddG_f1:.02}'
-        monitor = f'val_ddG_f1'
+    filename = cfg.name + '_{epoch:02d}_{val_ddG_spearman:.02}'
+    monitor = f'val_ddG_spearman'
+
 
     checkpoint_callback = ModelCheckpoint(monitor=monitor, mode='max', dirpath='checkpoints', filename=filename)
     logger = WandbLogger(project=cfg.project, name="test", log_model=False) if cfg.project is not None else None
-    n_steps = 100 if cfg.version == 'v2' else 10
+    n_steps = 100
     
     trainer = pl.Trainer(callbacks=[checkpoint_callback], 
                         logger=logger, 
