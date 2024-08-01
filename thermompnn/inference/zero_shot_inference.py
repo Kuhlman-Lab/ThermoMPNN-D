@@ -6,8 +6,6 @@ import os
 
 from thermompnn.inference.v2_inference import load_v2_dataset, run_prediction_batched
 from protein_mpnn_utils import ProteinMPNN
-# from proteinmpnn.model_utils import ProteinMPNN
-# from thermompnn.model.side_chain_model import ProteinMPNN
 from thermompnn.trainer.v2_trainer import TransferModelPLv2
 from train_thermompnn import parse_cfg
 
@@ -23,7 +21,6 @@ def inference(cfg, args):
     print('Loading model %s' % args.model)
 
     # load ProteinMPNN baseline model (DEPENDS on config settings)
-    # NOTE: this is the ThermoMPNN v2 version, NOT the updated side chain version (TODO set up this)
     if args.transfer:
         model = TransferModelPLv2.load_from_checkpoint(args.model, cfg=cfg, map_location=device).model
         
@@ -81,7 +78,6 @@ if __name__ == "__main__":
     parser.add_argument('--single_res_rec', type=bool, default=False)
     parser.add_argument('--side_chains', type=bool, default=False)
     parser.add_argument('--transfer', type=bool, default=False)
-    # parser.add_argument('--epi', help='use epistatic decoding?', default=False, action='store_true', type=bool)
 
     args = parser.parse_args()
     print(args)

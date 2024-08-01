@@ -4,7 +4,6 @@ import numpy as np
 import pickle
 import os
 from Bio import pairwise2
-from Bio.SeqUtils import seq1
 from tqdm import tqdm
 from copy import deepcopy
 from itertools import permutations
@@ -644,7 +643,7 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
             if 'double' in self.cfg.data.mut_types:
                 tmp = df.loc[(df.mut_type.str.count(":") == 1) & (~df.mut_type.str.contains("wt")), :].reset_index(drop=True)
                 
-                # Remove hidden single mutations as these are unreliable
+                # Remove hidden single mutations
                 mut = tmp.mut_type.values
                 mut1 = [m.split(':')[0] for m in mut]
                 mut2 = [m.split(':')[-1] for m in mut]
@@ -771,7 +770,7 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
                                 
         tmp_pdb = deepcopy(pdb) # this is hacky but it is needed or else it overwrites all PDBs with the last data point
 
-        ddG = float(row.ddG_ML)
+        ddG = -1 * float(row.ddG_ML)
         tmp_pdb['mutation'] = Mutation(pos_list, wt_list, mut_list, ddG, row.WT_name)
         return tmp_pdb
 
@@ -784,7 +783,7 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
 
     def _augment_double_mutants(self, df, c=1):
         """Use pairs of single mutants and modeled structures to make new double mutant data points
-        Rewritten to be vectorized  - can handle arbitrary multiplication ratios"""
+        Rewritten to be semi-vectorized  - can handle arbitrary multiplication ratios"""
         new_df = df.copy(deep=True)
         # trim to only single mutants
         new_df = new_df.loc[~new_df.mut_type.str.contains(':')]
@@ -805,18 +804,7 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
             chunk = positions == pos
             pchunks[pos] = chunk
 
-        # if distance weighting is enabled, load contact maps for all pdbs
-        if self.cfg.data.get('weight', False):
-            xyz_data = {}
-            print('Using inverse distance weighting on data augmentation!')
-            for un in np.unique(wtns):
-                # get PDB xyz data and calculate LxL distance map
-                xyz = self.pdb_data[un.removesuffix('.pdb')]['coords_chain_A']['CA_chain_A']
-                xyz = torch.tensor(np.stack(xyz)) # [L, 3]
-                xyz = torch.cdist(xyz, xyz)
-                xyz_data[un] = xyz # [L, L]
-
-        # if range weighting is enabled
+        # if ddG based weighting is enabled
         if self.cfg.data.range is not None:
             print('Range weighted augmentation enabled!')
             ddg_dist = new_df.loc[~new_df.mut_type.str.contains(':')]
@@ -828,7 +816,6 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
         mutations = new_df.mut_type.values
         ddgs = new_df.ddG_ML.values
 
-        oversample = self.cfg.data.oversample if 'oversample' in self.cfg.data else None
         if 'seed' in self.cfg.data:
             print('Setting data augmentation seed to %s' % str(self.cfg.data.seed))
             np.random.seed(self.cfg.data.seed)
@@ -837,48 +824,12 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
             mask = chunks[w] * ~pchunks[p]
             options = mutations[mask]
             ddgs_paired = ddgs[mask]
-            if oversample == 'scale':
-                probs = minmax_scale(ddgs_paired.astype(float))
-                probs = probs / np.sum(probs)
-            elif oversample is not None:
-                # calulate Nth percentile and only keep values above this cutoff
-                cutoff = np.percentile(ddgs_paired.astype(float), q=int(oversample))
-                probs = (ddgs_paired.astype(float) > cutoff).astype(float)
+
+            if self.cfg.data.get('range', False):
+                probs = all_probs[mask]
                 probs = probs / np.sum(probs)
             else:
-                if self.cfg.data.weight and self.cfg.data.range is not None:
-                    pos_set = positions[mask].astype(int) - 1
-                    xyz_subset = xyz_data[w][int(p) - 1, :] # [L, ]
-                    distances = xyz_subset[pos_set]
-                    probs1 = 1. / (distances ** 2) # weighted by inverse of squared distance
-                    probs1 = probs1.numpy() / np.sum(probs1.numpy())
-                    probs2 = all_probs[mask]
-                    probs2 = probs2 / np.sum(probs2)
-                    # just avg the probs for each data point
-                    probs = np.mean([probs1, probs2], axis=0)
-                    # plot the distributions
-                    # import matplotlib.pyplot as plt
-                    # plt.scatter(probs1, probs2, s=2)
-                    # plt.plot([0, .02], [0, .02], 'k--',)
-                    # plt.xlabel('DIST')
-                    # plt.ylabel('ddG')
-                    # # plt.hist(probs1, alpha=0.5, bins=50, label='DIST')
-                    # # plt.hist(probs2, alpha=0.5, bins=50, label='ddG')
-                    # # plt.legend()
-                    # plt.savefig('PROBS.png', dpi=300)
-                    # quit()
-                elif self.cfg.data.get('weight', False):
-                    # weight random choice to favor nearby residues
-                    pos_set = positions[mask].astype(int) - 1
-                    xyz_subset = xyz_data[w][int(p) - 1, :] # [L, ]
-                    distances = xyz_subset[pos_set]
-                    probs = 1. / (distances ** 2) # weighted by inverse of squared distance
-                    probs = probs / np.sum(probs.numpy())
-                elif self.cfg.data.get('range', False):
-                    probs = all_probs[mask]
-                    probs = probs / np.sum(probs)
-                else:
-                    probs = None
+                probs = None
                 
             chosen = np.random.choice(np.arange(options.size), size=c, p=probs)
 

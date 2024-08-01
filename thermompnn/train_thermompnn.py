@@ -1,6 +1,6 @@
 import sys
 import wandb
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -16,7 +16,6 @@ def parse_cfg(cfg):
     """
     Parse configuration scheme and set default arguments as needed
     """
-
     cfg.project = cfg.get('project', None)
     cfg.name = cfg.get('name', 'test')
 

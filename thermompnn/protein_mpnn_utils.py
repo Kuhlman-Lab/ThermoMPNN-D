@@ -1,18 +1,11 @@
 from __future__ import print_function
-import json, time, os, sys, glob
-import shutil
+import json, time
 import numpy as np
 import torch
-from torch import optim
-from torch.utils.data import DataLoader
-from torch.utils.data.dataset import random_split, Subset
 
-import copy
 import torch.nn as nn
 import torch.nn.functional as F
-import random
 import itertools
-import re
 from proteinmpnn.model_utils import IPMPDecoder, IPMPEncoder
 
 

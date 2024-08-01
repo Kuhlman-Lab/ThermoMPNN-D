@@ -28,40 +28,8 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
     
     print('Testing Model %s on dataset %s' % (name, dataset_name))
     preds, ddgs = [], []
-    if 'megascale' not in dataset_name:
-        batch_size = 1  # larger batches will fail due to different chain IDs - fix later
-    
-    # centrality analysis (SKEMPI)
-    # muts = (dataset.df.WT_AA + dataset.df.MUT_CHAIN + dataset.df.MUT_POS.astype(str) + dataset.df.MUT_AA).values
-    # wtns = (dataset.df.PDB_ID + '_' + dataset.df.CHAINS1 + '_' + dataset.df.CHAINS2).values
-    # cent = []
-    # ref = pd.read_csv('/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/SKEMPIv2/SKEMPI_v2_database.csv',sep=';')
-    # for mm, wtn in tqdm(zip(muts, wtns)):
-    #     sel = ref.loc[(ref['#Pdb'] == wtn) & (ref['Mutation(s)_cleaned'] == mm), 'Mutation_Location(s)'].values[0]
-    #     cent.append(sel)
-    
-    # centrality analysis (binderSSM)
-    # cent = {}
-    # for p in dataset.pdb_data.keys():
-    #     # grab cross-chain neighbor count for each p
-    #     # impute for every mutation
-    #     data = dataset.pdb_data[p]
-    #     binder_xyz = np.stack(data['coords_chain_A']['CA_chain_A']) # [Lb, 3]
-    #     target_xyz = np.stack(data['coords_chain_B']['CA_chain_B']) # [Lt, 3]
-    #     from scipy.spatial.distance import cdist
-    #     d = cdist(binder_xyz, target_xyz) # [Lb, Lt]
-    #     neigh = np.sum(d < 10, axis=-1) # [Lb]
-    #     cent[p] = neigh
 
-    # pdb = dataset.df.ssm_parent.values
-    # pos = dataset.df.pos.values
-    
-    # cent_l = []
-    # for pdi, po in tqdm(zip(pdb, pos)):
-    #     c = cent[pdi][int(po) - 1]
-    #     cent_l.append(c)
-
-    loader = DataLoader(dataset, collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.get('side_chains', False), esm=cfg.model.get('auxiliary_embedding', '') == 'localESM'), 
+    loader = DataLoader(dataset, collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.get('side_chains', False)), 
                         shuffle=False, num_workers=cfg.training.get('num_workers', 8), batch_size=cfg.training.get('batch_size', 256))
 
     batches = []
@@ -69,11 +37,7 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
 
         if batch is None:
             continue
-        if cfg.model.get('auxiliary_embedding', '') == 'localESM':
-            X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask, esm_emb = batch
-            esm_emb = esm_emb.to(device)
-        else:
-            X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask = batch
+        X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask = batch
 
         X = X.to(device)
         S = S.to(device)
@@ -88,28 +52,18 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
         mut_ddGs = mut_ddGs.to(device)
         atom_mask = torch.Tensor(atom_mask).to(device)
 
-        if cfg.model.get('auxiliary_embedding', '') == 'localESM':
-            pred, _ = model(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask, esm_emb)
-        elif cfg.model.get('aggregation', '') == 'siamese':
+        if cfg.model.get('aggregation', '') == 'siamese':
             # average both siamese network passes
             predA, predB = model(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask)
-            # print(torch.abs(predA[0] - predB[0]))
-            # pred = predA # TODO remove later
             pred = torch.mean(torch.cat([predA, predB], dim=-1), dim=-1)
         elif not zero_shot:
             pred, _ = model(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask)
-            # modified CQR inference
-            if pred.shape[-1] > 1:
-                pred = pred[..., 1]
-            # pred = torch.argmax(pred, dim=-1).unsqueeze(-1).to(torch.float32) # for classifer inference compatibility
         else:
             # non-epistatic (single mut) zero-shot
-            # print(X.shape, S.shape, mask.shape, chain_M.shape, residue_idx.shape, chain_encoding_all.shape)
             pred = model(X, S, mask, chain_M, residue_idx, chain_encoding_all)[-2]
-            # print(pred.shape, mut_positions.shape, mut_mutant_AAs.shape, mut_wildtype_AAs.shape)
             pred = zero_shot_convert(pred, mut_positions, mut_mutant_AAs, mut_wildtype_AAs)
 
-            # epistatic zero-shot
+            # epistatic zero-shot predictions
             # pred = model(X, S, mask, chain_M, residue_idx, chain_encoding_all, None, mut_positions)[-2]
 
             # pred1 = zero_shot_convert(pred, mut_positions[:, 0].unsqueeze(-1), mut_mutant_AAs[:, 0].unsqueeze(-1), mut_wildtype_AAs[:, 0].unsqueeze(-1))
@@ -139,21 +93,8 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
             'ddG_true': ddgs, 
             'batch': batches, 
             'mut_type': dataset.df.mut_type, 
-            # 'ddG_actual': dataset.df.ddG_actual, # for epi dataset only !
-            # 'ddG_actual_additive': dataset.df.additive,
-            # 'ddG_true_1': dataset.df.ddg1,
-            # 'ddG_true_2': dataset.df.ddg2,
             'WT_name': dataset.df.WT_name})
 
-        elif 'binder' in dataset_name:
-            tmp = pd.DataFrame({'ddG_pred': preds, 
-                                'ddG_true': ddgs, 
-                                'batch': batches,
-                                'region': dataset.df.region,
-                                # 'mut_type': dataset.df.pos + dataset.df.mut_to,
-                                # 'mut_type': dataset.df.wtAA + dataset.df.pos + dataset.df.mutAA, 
-                                'WT_name': dataset.df.ssm_parent, 
-                                })
         elif 'fireprot' in dataset_name:
             dataset.df.pdb_position = dataset.df.pdb_position.astype(str)
             tmp = pd.DataFrame({'ddG_pred': preds, 
@@ -161,27 +102,8 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
                                 'batches': batches, 
                                 'mut_type': dataset.df.wild_type + dataset.df.pdb_position + dataset.df.mutation,
                                 'WT_name': dataset.df.pdb_id_corrected})
-        elif 'SKEMPI' in dataset_name:
-            tmp = pd.DataFrame({'ddG_pred': preds, 
-                                'ddG_true': ddgs, 
-                                'batch': batches, 
-                                'wtAA': dataset.df.WT_AA, 
-                                'mutAA': dataset.df.MUT_AA, 
-                                'POS': dataset.df.MUT_POS, 
-                                'WT_name': dataset.df.PDB_ID})
-        elif 's487' in dataset_name:
-            tmp = pd.DataFrame({'ddG_pred': preds, 
-                                'ddG_true': ddgs, 
-                                'batch': batches, 
-                                'wtAA': dataset.df.WT_AA, 
-                                'mutAA': dataset.df.MUT_AA, 
-                                'POS': dataset.df.POS, 
-                                'WT_name': dataset.df.PDB})
         else:
             if 'ptmul' in dataset_name: # manually correct for subset inference df size mismatch
-                # preds = preds[dataset.df.NMUT < 3]
-                # ddgs = ddgs[dataset.df.NMUT < 3]
-                # batches = np.array(batches)[dataset.df.NMUT < 3]
                 dataset.df = dataset.df.loc[dataset.df.NMUT < 3].reset_index(drop=True)
                 tmp = pd.DataFrame({'ddG_pred': preds, 
                 'ddG_true': ddgs, 
@@ -195,10 +117,6 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
                                     'batch': batches, 
                                     'mut_type': dataset.df.MUTS, 
                                     'WT_name': dataset.df.PDB})
-
-        # tmp['CENTRALITY'] = cent
-        # tmp['CENTRALITY'] = cent_l
-        # tmp = tmp.reset_index(drop=True)
 
         tmp.to_csv(f'ThermoMPNN_{os.path.basename(name).removesuffix(".ckpt")}_{dataset_name}_preds.csv')
 
@@ -223,7 +141,6 @@ def load_v2_dataset(cfg):
     ds_all = {
         'megascale': MegaScaleDatasetv2,  
         'fireprot': FireProtDatasetv2, 
-        'binder-SSM': BinderSSMDataset,
         'ddgbench': ddgBenchDatasetv2
     }
     dataset = cfg.data.dataset
@@ -237,74 +154,11 @@ def load_v2_dataset(cfg):
         ds = ds_all[dataset]
         return ds(cfg, split)
 
-    elif dataset == 'binderSSM-omar':
-        print('Loading Omar SSM Dataset')
-        csv_loc = os.path.join(cfg.data_loc.misc_data, 'binder-SSM/omar-processed-data/ssm.sc')
-        pdb_loc = os.path.join(cfg.data_loc.misc_data, 'binder-SSM/omar-processed-data/parents')
-        split_loc = os.path.join(cfg.data_loc.misc_data, 'binder-SSM/omar-processed-data/splits/ssm_splits.pkl')
-        return BinderSSMDatasetOmar(cfg, split, csv_loc, pdb_loc, split_loc)
-
-    elif dataset == 'binder-SSM':
-        
-        ds = ds_all[dataset]
-        csv_loc = os.path.join(cfg.data_loc.misc_data, 'binder-SSM/Binder-SSM-Dataset.csv')
-        pdb_loc = os.path.join(cfg.data_loc.misc_data, 'binder-SSM/parents')
-        split_loc = os.path.join(cfg.data_loc.misc_data, 'binder-SSM/ssm_split_henry.pkl')
-        return ds(cfg, split, 
-                  csv_file=csv_loc, 
-                  pdb_loc=pdb_loc, 
-                  split_file=split_loc)
-
-    elif dataset == 'SKEMPI':
-        csvf = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/SKEMPIv2/SKEMPI_v2_single.csv'
-        pdbd = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/SKEMPIv2/PDBs'
-        dataset = SKEMPIDataset(cfg, csv_file=csvf, pdb_loc=pdbd, split=split)
-        return dataset
-
-    elif dataset == 'SKEMPI_double':
-        csvf = '/home/hdieckhaus/scripts/ThermoMPNN/data/SKEMPIv2/SKEMPI_v2_double.csv'
-        pdbd = '/home/hdieckhaus/scripts/ThermoMPNN/data/SKEMPIv2/PDBs'
-        dataset = SKEMPIDoubleDataset(cfg, csv_file=csvf, pdb_loc=pdbd, split=split)
-        return dataset        
-
-    elif dataset == 's487':
-        csvf = os.path.join(cfg.data_loc.misc_data, 'SKEMPIv2/s487.csv')
-        pdbd = os.path.join(cfg.data_loc.misc_data, 'SKEMPIv2/PDBs')
-        return S487Dataset(cfg, csv_file=csvf, pdb_loc=pdbd)
-
-    elif dataset == 'mdm2-p53':
-        csvf = os.path.join(cfg.data_loc.misc_data, 'case_studies/MDM2-p53/mdm2_p53.tsv')
-        pdbd = os.path.join(cfg.data_loc.misc_data, 'case_studies/MDM2-p53')
-        return PPIDataset(cfg, csv_file=csvf, pdb_loc=pdbd)
-
     else:
         ds = ds_all['ddgbench']
         flip = False
 
-        if dataset == 's669':
-            pdb_loc = os.path.join(cfg.data_loc.misc_data, 'S669/pdbs')
-            csv_loc = os.path.join(cfg.data_loc.misc_data, 'S669/s669_clean_dir.csv')
-
-        elif dataset == 'ssym':
-            pdb_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/SSYM/pdbs')
-            if split == 'dir':
-                csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/SSYM/ssym-5fold_clean_dir.csv')
-            else:
-                csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/SSYM/ssym-5fold_clean_inv.csv')
-
-        elif dataset == 'p53':
-            if split != 'dir':  # handle inverse mutations (w/Rosetta structures)
-                flip = True
-            pdb_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/P53/pdbs')
-            csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/P53/p53_clean.csv')
-
-        elif dataset == 'myoglobin':
-            if split != 'dir':
-                flip = True
-            pdb_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/MYOGLOBIN/pdbs')
-            csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/MYOGLOBIN/myoglobin_clean.csv')
-
-        elif dataset == 'ptmul':
+        if dataset == 'ptmul':
             if split != 'dir': # ptmul mutateeverything splits
                 print('loading ptmul with alternate splits/curation from MutateEverything paper')
                 pdb_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/PTMUL/pdbs')
@@ -339,160 +193,3 @@ def zero_shot_convert(preds, positions, mut_AAs, wt_AAs=None):
         mut_logs = -1 * mut_logs
 
     return mut_logs
-
-# ------------- Conf Prediction Section ------- #
-
-def load_conf_dataset(cfg):
-    """Parses input config and sets up proper dataset for INFERENCE only"""
-
-    ds_all = {
-        'megascale': MegaScaleDatasetv2,  
-    }
-    dataset = cfg.data.dataset
-    cal_split = cfg.data.splits[0]
-    test_split = cfg.data.splits[1]
-
-    if dataset == 'megascale':
-        ds = ds_all[dataset]
-        return ds(cfg, cal_split), ds(cfg, test_split)
-    else:
-        raise ValueError('Conf dataset not configured yet!')
-
-
-
-
-def run_prediction_conf(name, model, dataset_name, cal_dataset, test_dataset, results, keep=True, zero_shot=False, cfg=None):
-    """Conformal inference for CSV/PDB based dataset in batched models"""
-    print('Conformal inference enabled!')
-    device = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
-
-    max_batches = None
-    metrics = {
-        "ddG": get_metrics_full(),
-    }
-    for m in metrics['ddG'].values():
-        m = m.to(device)
-    
-    model = model.eval()
-    model = model.cuda()
-    
-    print('Testing Model %s on dataset %s' % (name, dataset_name))
-
-    loader = DataLoader(dataset, collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.get('side_chains', False), esm=cfg.model.get('auxiliary_embedding', '') == 'localESM'), 
-                        shuffle=False, num_workers=cfg.training.get('num_workers', 8), batch_size=cfg.training.get('batch_size', 256))
-
-    batches = []
-    preds, ddgs, upper, lower = [], [], [], []
-    for i, batch in enumerate(tqdm(loader)):
-
-        if batch is None:
-            continue
-        
-        X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask = batch
-
-        X = X.to(device)
-        S = S.to(device)
-        mask = mask.to(device)
-        lengths = torch.Tensor(lengths).to(device)
-        chain_M = chain_M.to(device)
-        chain_encoding_all = chain_encoding_all.to(device)
-        residue_idx = residue_idx.to(device)
-        mut_positions = mut_positions.to(device)
-        mut_wildtype_AAs = mut_wildtype_AAs.to(device)
-        mut_mutant_AAs = mut_mutant_AAs.to(device)
-        mut_ddGs = mut_ddGs.to(device)
-        atom_mask = torch.Tensor(atom_mask).to(device)
-
-        pred, _ = model(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask)
-        # TODO conformal inference
-        # pred[0] is upper, pred[1] is median, pred[2] is lower
-        
-        for metric in metrics["ddG"].values():
-            metric.update(torch.squeeze(pred[1], dim=-1), torch.squeeze(mut_ddGs, dim=-1))
-
-        if max_batches is not None and i >= max_batches:
-            break
-        
-        preds += list(torch.squeeze(pred[1], dim=-1).detach().cpu())
-        ddgs += list(torch.squeeze(mut_ddGs, dim=-1).detach().cpu())
-        batches += [i for p in range(len(pred))]   
-
-        upper += list(torch.squeeze(pred[0], dim=-1).detach().cpu())
-        lower += list(torch.squeeze(pred[2], dim=-1).detach().cpu())
-    
-    print('%s mutations evaluated' % (str(len(ddgs))))
-    
-    df = pd.DataFrame({
-        'ddG_pred': preds, 
-        'ddG_true': ddgs, 
-        'batch': batches, 
-        'ddG_upper': upper,
-        'ddG_lower': lower
-    })
-
-    # TODO calculate conformity scores
-
-    # TODO calculate empirical quantiles
-
-    # TODO calculate adjusted predictionintervals
-
-    # if keep:
-    #     preds, ddgs = np.squeeze(preds), np.squeeze(ddgs)
-
-    #     if 'megascale' in dataset_name:
-    #         tmp = pd.DataFrame({'ddG_pred': preds, 
-    #         'ddG_true': ddgs, 
-    #         'batch': batches, 
-    #         'mut_type': dataset.df.mut_type, 
-    #         'WT_name': dataset.df.WT_name})
-
-    #     elif 'fireprot' in dataset_name:
-    #         dataset.df.pdb_position = dataset.df.pdb_position.astype(str)
-    #         tmp = pd.DataFrame({'ddG_pred': preds, 
-    #                             'ddG_true': ddgs, 
-    #                             'batches': batches, 
-    #                             'mut_type': dataset.df.wild_type + dataset.df.pdb_position + dataset.df.mutation,
-    #                             'WT_name': dataset.df.pdb_id_corrected})
-    #     elif 'SKEMPI' in dataset_name:
-    #         tmp = pd.DataFrame({'ddG_pred': preds, 
-    #                             'ddG_true': ddgs, 
-    #                             'batch': batches, 
-    #                             'wtAA': dataset.df.WT_AA, 
-    #                             'mutAA': dataset.df.MUT_AA, 
-    #                             'POS': dataset.df.MUT_POS, 
-    #                             'WT_name': dataset.df.PDB_ID})
-    #     elif 's487' in dataset_name:
-    #         tmp = pd.DataFrame({'ddG_pred': preds, 
-    #                             'ddG_true': ddgs, 
-    #                             'batch': batches, 
-    #                             'wtAA': dataset.df.WT_AA, 
-    #                             'mutAA': dataset.df.MUT_AA, 
-    #                             'POS': dataset.df.POS, 
-    #                             'WT_name': dataset.df.PDB})
-    #     else:
-    #         if 'ptmul' in dataset_name: # manually correct for subset inference df size mismatch
-    #             preds = preds[dataset.df.NMUT < 3]
-    #             ddgs = ddgs[dataset.df.NMUT < 3]
-    #             batches = np.array(batches)[dataset.df.NMUT < 3]
-    #             dataset.df = dataset.df.loc[dataset.df.NMUT < 3].reset_index(drop=True)
-    #         tmp = pd.DataFrame({'ddG_pred': preds, 
-    #         'ddG_true': ddgs, 
-    #         'batch': batches, 
-    #         'mut_type': dataset.df.MUTS, 
-    #         'WT_name': dataset.df.PDB})
-
-    #     tmp.to_csv(f'ThermoMPNN_{os.path.basename(name).removesuffix(".ckpt")}_{dataset_name}_preds.csv')
-
-    # column = {
-    #     "Model": name,
-    #     "Dataset": dataset_name,
-    # }
-    # for dtype in ["ddG"]:
-    #     for met_name, metric in metrics[dtype].items():
-    #         try:
-    #             column[f"{dtype} {met_name}"] = metric.compute().cpu().item()
-    #             print(met_name, column[f"{dtype} {met_name}"])
-    #         except ValueError:
-    #             pass
-    # results.append(column)
-    # return results

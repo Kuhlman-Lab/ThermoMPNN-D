@@ -18,6 +18,7 @@ def batched_index_select(input, dim, index):
     return torch.gather(input, dim, index)
 
 def _dist(X, mask, eps=1E-6, top_k=48):
+    """ProteinMPNN distance calculation"""
     mask_2D = torch.unsqueeze(mask, 1) * torch.unsqueeze(mask, 2)
     dX = torch.unsqueeze(X, 1) - torch.unsqueeze(X, 2)
     D = mask_2D * torch.sqrt(torch.sum(dX ** 2, 3) + eps)
@@ -34,7 +35,6 @@ def _get_cbeta(X):
     Cb = -0.58273431 * a + 0.56802827 * b - 0.54067466 * c + X[:, :, 1, :]
     Cb = Cb.unsqueeze(2)
     return torch.cat([Cb, X], axis=2)
-
 
 def _check_sequence_match(S, wt, mut, pos):
     """
@@ -63,8 +63,7 @@ class TransferModelv2(nn.Module):
         self.multi_mutations = True if self.cfg.model.aggregation is not None else False
 
         if 'proteinmpnn' in self.cfg.model:
-            # custom proteinmpnn model loading (different noise levels, side chains, etc)
-            print('Loading custom mpnn model!')
+            # for side chain aware or alternatively trained models
             self.prot_mpnn = get_protein_mpnn_sca(cfg)
         else:
             self.prot_mpnn = get_protein_mpnn(cfg)
@@ -75,15 +74,6 @@ class TransferModelv2(nn.Module):
         hid_sizes += [ VOCAB_DIM ]
 
         print('MLP HIDDEN SIZES:', hid_sizes)
-
-        if self.cfg.model.aggregation == 'mpnn':
-            # for multi-mutant model, set up learned aggregation module
-            self.message_size = hid_sizes[0]  # was 128 before
-            self.aggregator = nn.Sequential(*[
-                                            nn.ReLU(), 
-                                            nn.Linear(hid_sizes[0], self.message_size), 
-                                            MPNNLayer(num_hidden = self.message_size, num_in = self.message_size * 2, dropout = 0.1)
-            ])
 
         if self.cfg.model.lightattn:
             if self.multi_mutations:
@@ -100,7 +90,6 @@ class TransferModelv2(nn.Module):
 
         if self.cfg.model.side_chain_module:
             rbfs = self.cfg.data.side_chain_rbfs if 'side_chain_rbfs' in self.cfg.data else 4
-            print('Side Chain RBFs:', rbfs)
             self.side_chain_features = SideChainModule(num_positional_embeddings=16, num_rbf=rbfs, 
                                                        node_features=128, edge_features=128, 
                                                        top_k=30, augment_eps=0., encoder_layers=1, thru=True, 
@@ -119,7 +108,6 @@ class TransferModelv2(nn.Module):
         """Vectorized fwd function for arbitrary batches of mutations"""
 
         # getting ProteinMPNN embeddings (use only backbone atoms)
-
         if self.multi_mutations:
             # check if S matches mut_wildtype_AAs - if not, overwrite it
             S = _check_sequence_match(S, mut_wildtype_AAs, mut_mutant_AAs, mut_positions)
@@ -150,9 +138,7 @@ class TransferModelv2(nn.Module):
                     mut_embed = torch.cat([m.unsqueeze(-1) for m in mut_embed_list], -1) # shape: (Batch, Embed, N_muts)
             
                 if self.cfg.model.edges:  # add edges to input for gathering
-                    # retrieve paired residue edges based on mut_position values
-
-                     # E_idx is [B, K, L] and is a tensor of indices in X that should match neighbors
+                    # E_idx is [B, K, L] and is a tensor of indices in X that should match neighbors
                     D_n, E_idx = _dist(X[:, :, 1, :], mask)
 
                     all_mpnn_edges = []
@@ -277,10 +263,8 @@ class TransferModelv2(nn.Module):
             else:  # non-learned aggregations
                 # run each embedding through LA / MLP layer, even if masked out
                 for n, emb in enumerate(all_mpnn_embed):
-                    # emb = torch.unsqueeze(emb, -1)  # shape for LA input: (batch, embed_dim, seq_length=1)
                     emb = self.light_attention(emb)  # shape for LA output: (batch, embed_dim)
                     all_mpnn_embed[n] = emb  # update list of embs
-
                 all_mpnn_embed = torch.stack(all_mpnn_embed, dim=-1)  # shape: (batch, embed_dim, n_mutations)
 
                 # get mask of which embeds are empty second halves of single mutations
@@ -288,7 +272,7 @@ class TransferModelv2(nn.Module):
                 assert(torch.sum(mask[:, 0]) == 0)  # check that first mutation is ALWAYS visible
                 mask = mask.unsqueeze(1).repeat(1, all_mpnn_embed.shape[1], 1)  # expand along embedding dimension
                 
-                # depending on aggregation fxn, different masking needs to be done
+                # depending on aggregation fxn, different masking stlyes need to be done
                 if self.cfg.model.aggregation == 'mean':
                     all_mpnn_embed[mask] = torch.nan
                     mpnn_embed = torch.nanmean(all_mpnn_embed, dim=-1)
@@ -329,7 +313,6 @@ class TransferModelv2(nn.Module):
             mpnn_embed = torch.cat(embeds_all, -1)
             
             # vectorized indexing of the embeddings (this is very ugly but the best I can do for now)
-            # unsqueeze gets mut_pos to shape (batch, 1, 1), then this is copied with expand to be shape (batch, 1, embed_dim) for gather
             mpnn_embed = torch.gather(mpnn_embed, 1, mut_positions.unsqueeze(-1).expand(mut_positions.size(0), mut_positions.size(1), mpnn_embed.size(2)))
             mpnn_embed = torch.squeeze(mpnn_embed, 1) # final shape: (batch, embed_dim)
             if self.cfg.model.auxiliary_embedding == 'globalMPNN': 
@@ -376,19 +359,9 @@ class TransferModelv2(nn.Module):
         if self.cfg.model.side_chain_module:
             print('Enabling side chains!')
             EMBED_DIM += 128
-        
-        if self.cfg.model.auxiliary_embedding == 'globalMPNN':
-            print('Enabling global embeddings!')
-            EMBED_DIM += 128
-        elif self.cfg.model.auxiliary_embedding == 'localESM':
-            print('Enabling local ESM embeddings!')
-            EMBED_DIM += 320 
-
+    
         HIDDEN_DIM = 128 # mpnn default hidden dim size
         VOCAB_DIM = 21 if not self.cfg.model.single_target else 1
-
-        if self.cfg.model.classifier:
-            VOCAB_DIM = 3 # one for each class
 
         return HIDDEN_DIM, EMBED_DIM, VOCAB_DIM
 
@@ -413,11 +386,8 @@ class TransferModelv2Siamese(nn.Module):
             self.light_attention = nn.Sequential()
             # LayerNorm and project collected features down to 128-dimensions no matter what
             self.light_attention.append(nn.LayerNorm(HIDDEN_DIM * self.cfg.model.num_final_layers + EMBED_DIM))  # do layer norm before MLP
-            # NOTE henry remove //8
-            self.light_attention.append(nn.Linear(HIDDEN_DIM * self.cfg.model.num_final_layers + EMBED_DIM, HIDDEN_DIM, bias=True)) # // 8, bias=True)) # E down to 128 regardless
+            self.light_attention.append(nn.Linear(HIDDEN_DIM * self.cfg.model.num_final_layers + EMBED_DIM, HIDDEN_DIM, bias=True)) # E down to 128 regardless
             self.light_attention.append(nn.ReLU())
-            # NOTE henry remove this line
-            # hid_sizes[0] = HIDDEN_DIM // 4
             if self.cfg.model.dropout is not None:
                 self.light_attention.append(nn.Dropout(float(self.cfg.model.dropout)))
 
@@ -579,13 +549,6 @@ class TransferModelv2Siamese(nn.Module):
         if self.cfg.model.side_chain_module:
             print('Enabling side chains!')
             EMBED_DIM += 128
-        
-        if self.cfg.model.auxiliary_embedding == 'globalMPNN':
-            print('Enabling global embeddings!')
-            EMBED_DIM += 128
-        elif self.cfg.model.auxiliary_embedding == 'localESM':
-            print('Enabling local ESM embeddings!')
-            EMBED_DIM += 320 
 
         HIDDEN_DIM = 128 # mpnn default hidden dim size
         VOCAB_DIM = 441 if not self.cfg.model.single_target else 1

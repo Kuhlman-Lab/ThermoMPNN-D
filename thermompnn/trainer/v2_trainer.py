@@ -136,7 +136,7 @@ class TransferModelPLv2Siamese(pl.LightningModule):
             for out in self.out:
                 self.metrics[split][out] = nn.ModuleDict()
                 sym = self.cfg.model.aggregation == 'siamese'
-                for name, metric in get_metrics(self.cfg.model.classifier, sym).items():
+                for name, metric in get_metrics(True, sym).items():
                     self.metrics[split][out][name] = metric
 
     def forward(self, *args):

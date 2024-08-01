@@ -1,11 +1,9 @@
 platform:
   accel: "gpu"
-  cache_dir: "/proj/kuhl_lab/users/dieckhau/cache"
   thermompnn_dir: "/proj/kuhl_lab/users/dieckhau/ThermoMPNN"
 
 data_loc:
         megascale_csv: "/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/mega_scale/Processed_K50_dG_datasets/Tsuboyama2023_Dataset2_Dataset3_20230416.csv"
-        # megascale_splits: "/proj/kuhl_lab/users/dieckhau/ThermoMPNN/thermompnn/datasets/splits/mega_splits.pkl"
         megascale_splits: "/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/mega_scale/mega_splits.pkl"
         megascale_pdbs: "/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/mega_scale/AlphaFold_model_PDBs/"
 

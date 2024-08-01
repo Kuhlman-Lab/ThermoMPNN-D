@@ -4,13 +4,9 @@ from omegaconf import OmegaConf
 import pandas as pd
 import os
 
-from thermompnn.inference.v1_inference import load_v1_dataset, run_prediction_default, run_prediction_keep_preds
-from thermompnn.inference.v2_inference import load_v2_dataset, run_prediction_batched, load_conf_dataset, run_prediction_conf
-from thermompnn.inference.siamese_inference import load_siamese_dataset, run_prediction_siamese
+from thermompnn.inference.v2_inference import load_v2_dataset, run_prediction_batched
 
-from thermompnn.trainer.v1_trainer import TransferModelPL
 from thermompnn.trainer.v2_trainer import TransferModelPLv2, TransferModelPLv2Siamese
-from thermompnn.trainer.siamese_trainer import TransferModelSiamesePL
 
 
 def inference(cfg, args):
@@ -21,39 +17,13 @@ def inference(cfg, args):
     ds_name = cfg.data.dataset
     model_name = args.model.removesuffix('.ckpt')
     
-    if cfg.version == 'v1':
-        # load specified dataset
-        ds = load_v1_dataset(cfg)
-        # load model weights
-        model = TransferModelPL.load_from_checkpoint(args.model, cfg=cfg, map_location=device).model
-        # run inference function 
-        if args.keep_preds:
-            print('Keeping preds!')
-            results = run_prediction_keep_preds(model_name, model, ds_name, ds, [], centrality=args.centrality)
-        else:
-            results = run_prediction_default(model_name, model, ds_name, ds, [])
-
-    elif cfg.version == 'v2':
-        ds = load_v2_dataset(cfg)
-        print('Loading model %s' % args.model)
-        if cfg.model.aggregation == 'siamese':
-            model = TransferModelPLv2Siamese.load_from_checkpoint(args.model, cfg=cfg, map_location=device, train_dataset=ds, val_dataset=ds).model
-        else:
-            model = TransferModelPLv2.load_from_checkpoint(args.model, cfg=cfg, map_location=device, train_dataset=ds, val_dataset=ds).model
-        results = run_prediction_batched(model_name, model, ds_name, ds, [], args.keep_preds, cfg=cfg)
-
-    # elif cfg.version == 'conf':
-    #     ds1, ds2 = load_conf_dataset(cfg) # TODO load calibration set AND test set
-    #     model = TransferModelPLv2.load_from_checkpoint(args.model, cfg=cfg, map_location=device, train_dataset=ds1, val_dataset=ds2).model
-    #     results = run_prediction_conf(model_name, ds_name, ds1, ds2, [], args.keep_preds, cfg=cfg)
-
-    elif cfg.version == 'siamese':
-        ds = load_siamese_dataset(cfg)
-        model = TransferModelSiamesePL.load_from_checkpoint(args.model, cfg=cfg, map_location=device).model
-        results = run_prediction_siamese(model_name, model, ds_name, ds, [], keep=False, use_both=True)
-
+    ds = load_v2_dataset(cfg)
+    print('Loading model %s' % args.model)
+    if cfg.model.aggregation == 'siamese':
+        model = TransferModelPLv2Siamese.load_from_checkpoint(args.model, cfg=cfg, map_location=device, train_dataset=ds, val_dataset=ds).model
     else:
-        raise ValueError("Invalid ThermoMPNN version specified. Options are v1, v2, conf, siamese.")
+        model = TransferModelPLv2.load_from_checkpoint(args.model, cfg=cfg, map_location=device, train_dataset=ds, val_dataset=ds).model
+    results = run_prediction_batched(model_name, model, ds_name, ds, [], args.keep_preds, cfg=cfg)
 
     df = pd.DataFrame(results)
     print(df)
