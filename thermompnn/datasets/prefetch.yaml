@@ -5,13 +5,13 @@ version: v2
 
 data:
   # dataset: megascale
-  # splits: [train_ptmul, val]
-  # mut_types: [double, double-aug]
-  # range: 3
-  # seed: 111
-  dataset: ptmul
-  splits: [alt]
-  mut_types: [double]
+  splits: [train_ptmul, val]
+  mut_types: [double, double-aug]
+  range: 3
+  seed: 111
+  # dataset: ptmul
+  # splits: [alt]
+  # mut_types: [double]
 
 training:
   num_workers: 12

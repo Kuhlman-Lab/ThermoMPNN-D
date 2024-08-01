@@ -11,6 +11,7 @@ from protein_mpnn_utils import ProteinMPNN
 from thermompnn.trainer.v2_trainer import TransferModelPLv2
 from train_thermompnn import parse_cfg
 
+
 def inference(cfg, args):
     """Catch-all inference function for all ThermoMPNN versions"""
     cfg = parse_cfg(cfg)
@@ -43,10 +44,7 @@ def inference(cfg, args):
                             num_letters=21,
                             use_ipmp=args.use_ipmp,
                             n_points=args.n_points,)
-                            # single_res_rec=args.single_res_rec, 
-                            # side_chains=args.side_chains, 
-                            # decoding_order=args.dec_order
-                            # )
+
         model.load_state_dict(ckpt['model_state_dict'])
     model.to(device)
     model.eval()
@@ -83,6 +81,7 @@ if __name__ == "__main__":
     parser.add_argument('--single_res_rec', type=bool, default=False)
     parser.add_argument('--side_chains', type=bool, default=False)
     parser.add_argument('--transfer', type=bool, default=False)
+    # parser.add_argument('--epi', help='use epistatic decoding?', default=False, action='store_true', type=bool)
 
     args = parser.parse_args()
     print(args)

@@ -1,7 +1,7 @@
 import os 
 
-from thermompnn.datasets.v1_datasets import MegaScaleDataset, FireProtDataset, ComboDataset
-from thermompnn.datasets.v2_datasets import MegaScaleDatasetv2, BinderSSMDataset, BinderSSMDatasetOmar, ComboDataset, SKEMPIDataset
+from thermompnn.datasets.v1_datasets import MegaScaleDataset, FireProtDataset
+from thermompnn.datasets.v2_datasets import MegaScaleDatasetv2, BinderSSMDataset, BinderSSMDatasetOmar, SKEMPIDataset
 from thermompnn.datasets.siamese_datasets import MegaScaleDatasetSiamese, MegaScaleDatasetSiamesePt
 
 
@@ -14,7 +14,6 @@ def get_v1_dataset(cfg):
     datasets = {
         'megascale': MegaScaleDataset, 
         'fireprot': FireProtDataset, 
-        'combo': ComboDataset
     }
     
     if query in datasets.keys():
@@ -48,13 +47,6 @@ def get_v2_dataset(cfg):
             pdb_loc = os.path.join(cfg.data_loc.misc_data, 'binder-SSM/parents')
             split_loc = os.path.join(cfg.data_loc.misc_data, 'binder-SSM/ssm_split_henry.pkl')
             return BinderSSMDataset(cfg, splits[0], csv_loc, pdb_loc, split_loc), BinderSSMDataset(cfg, splits[1], csv_loc, pdb_loc, split_loc)
-    elif query.startswith('combo'):
-        print("Loading combo dataset!")
-        csv_loc = os.path.join(cfg.data_loc.misc_data, 'binder-SSM/Binder-SSM-Dataset.csv')
-        pdb_loc = os.path.join(cfg.data_loc.misc_data, 'binder-SSM/parents')
-        split_loc = os.path.join(cfg.data_loc.misc_data, 'binder-SSM/ssm_split_henry.pkl')
-        return ComboDataset(cfg, splits[0], csv_loc, pdb_loc, split_loc), ComboDataset(cfg, splits[1], csv_loc, pdb_loc, split_loc)
-    
     elif query.startswith('skempi'):
         print('Loading SKEMPI dataset!')
         csv_loc = os.path.join(cfg.data_loc.misc_data, 'SKEMPIv2/SKEMPI_v2_single.csv')

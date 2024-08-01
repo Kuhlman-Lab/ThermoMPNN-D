@@ -1253,7 +1253,7 @@ class ProteinMPNN(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-    def forward(self, X, S, mask, chain_M, residue_idx, chain_encoding_all, randn=None):
+    def forward(self, X, S, mask, chain_M, residue_idx, chain_encoding_all, randn=None, mut_positions=None):
         """ Graph-conditioned sequence model """
         device = X.device
         # Prepare node and edge embeddings
@@ -1297,6 +1297,13 @@ class ProteinMPNN(nn.Module):
 
         # set all residues to be visible
         order_mask_backward = torch.ones_like(order_mask_backward)
+        if mut_positions is not None:
+            # mask out the other position!
+            # print('EPISTATIC PROTEINMPNN ENABLED')
+            for b in range(order_mask_backward.shape[0]):
+                order_mask_backward[b, mut_positions[b, 0], :] = 0
+                order_mask_backward[b, mut_positions[b, 1], :] = 0
+                # order_mask_backward[b, mut_positions[b], :] = 0
 
         # apply padding/visible residue mask
         chain_applied = chain_M.unsqueeze(-1).repeat(1, 1, order_mask_backward.shape[2])

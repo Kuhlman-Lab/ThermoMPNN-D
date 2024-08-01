@@ -4,27 +4,27 @@
 version: v2 # options: (v1, v2, siamese)
 
 data:
-  # dataset: fireprot
-  # splits: [homologue-free]
-  # mut_types: [single]
-  # dataset: ssym
-  # splits: [dir]
-  # mut_types: [single]
   # dataset: megascale
-  # splits: [test_cdna2]
-  # splits: [test]
-  # splits: [train]
-  # mut_types: [single]
   # mut_types: [double]
-  # mut_types: [single, double]
-  dataset: ptmul
-  splits: [alt]
+  # splits: [denovo]
+  # splits: [test_cdna]
+  # splits: [train_ptmul]
+  # dataset: ptmul
+  # mut_types: [double]
+  # splits: [alt]
+  dataset: proteingym
   mut_types: [double]
-  # mut_types: [higher]
-  # mut_types: [double, higher]
-  # dataset: SKEMPI_double
-  # splits: [all]
-  # epi: true
+
+  # splits: [GFP_AEQVI]
+  # splits: [D7PM05_CLYGR]
+  # splits: [Q6WV12_9MAXI]
+  # splits: [Q8WTC7_9CNID]
+
+  splits: [HIS7_YEAST]
+  # splits: [PHOT_CHLRE]
+
+  # splits: [RASK_HUMAN]
+  # pick: 1
 
 
 training:
@@ -34,6 +34,17 @@ training:
   lr_schedule: true
   batch_size: 1
   shuffle: false
+
+# model:
+  # hidden_dims: [64, 32]
+  # subtract_mut: true
+  # mutant_embedding: false
+  # single_target: false
+  # num_final_layers: 2
+  # freeze_weights: true
+  # load_pretrained: true
+  # lightattn: true
+  # proteinmpnn_dropout: 0.0
 
 model:
   hidden_dims: [128, 128]

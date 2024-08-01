@@ -6,7 +6,7 @@ from tqdm import tqdm
 import numpy as np
 import pandas as pd
 
-from thermompnn.datasets.v2_datasets import MegaScaleDatasetv2, FireProtDatasetv2, ddgBenchDatasetv2, tied_featurize_mut, BinderSSMDataset, BinderSSMDatasetOmar, SKEMPIDataset, S487Dataset, PPIDataset, SKEMPIDoubleDataset
+from thermompnn.datasets.v2_datasets import MegaScaleDatasetv2, FireProtDatasetv2, ddgBenchDatasetv2, tied_featurize_mut, BinderSSMDataset, BinderSSMDatasetOmar, SKEMPIDataset, S487Dataset, PPIDataset, SKEMPIDoubleDataset, ProteinGymDataset
 from thermompnn.inference.inference_utils import get_metrics_full
 from thermompnn.model.v2_model import batched_index_select
 
@@ -94,6 +94,7 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
             # average both siamese network passes
             predA, predB = model(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask)
             # print(torch.abs(predA[0] - predB[0]))
+            # pred = predA # TODO remove later
             pred = torch.mean(torch.cat([predA, predB], dim=-1), dim=-1)
         elif not zero_shot:
             pred, _ = model(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask)
@@ -102,9 +103,19 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
                 pred = pred[..., 1]
             # pred = torch.argmax(pred, dim=-1).unsqueeze(-1).to(torch.float32) # for classifer inference compatibility
         else:
+            # non-epistatic (single mut) zero-shot
+            # print(X.shape, S.shape, mask.shape, chain_M.shape, residue_idx.shape, chain_encoding_all.shape)
             pred = model(X, S, mask, chain_M, residue_idx, chain_encoding_all)[-2]
+            # print(pred.shape, mut_positions.shape, mut_mutant_AAs.shape, mut_wildtype_AAs.shape)
             pred = zero_shot_convert(pred, mut_positions, mut_mutant_AAs, mut_wildtype_AAs)
-            # pred = zero_shot_convert(pred, mut_positions, mut_mutant_AAs) # absolute logits are less predictive than relative logits
+
+            # epistatic zero-shot
+            # pred = model(X, S, mask, chain_M, residue_idx, chain_encoding_all, None, mut_positions)[-2]
+
+            # pred1 = zero_shot_convert(pred, mut_positions[:, 0].unsqueeze(-1), mut_mutant_AAs[:, 0].unsqueeze(-1), mut_wildtype_AAs[:, 0].unsqueeze(-1))
+            # pred2 = zero_shot_convert(pred, mut_positions[:, 1].unsqueeze(-1), mut_mutant_AAs[:, 1].unsqueeze(-1), mut_wildtype_AAs[:, 1].unsqueeze(-1))
+            # pred = pred1 + pred2
+
         if len(pred.shape) == 1:
             pred = pred.unsqueeze(-1)
 
@@ -172,12 +183,19 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
                 # ddgs = ddgs[dataset.df.NMUT < 3]
                 # batches = np.array(batches)[dataset.df.NMUT < 3]
                 dataset.df = dataset.df.loc[dataset.df.NMUT < 3].reset_index(drop=True)
-            tmp = pd.DataFrame({'ddG_pred': preds, 
-            'ddG_true': ddgs, 
-            'batch': batches, 
-            'mut_type': dataset.df.MUTS, 
-            'WT_name': dataset.df.PDB})
+                tmp = pd.DataFrame({'ddG_pred': preds, 
+                'ddG_true': ddgs, 
+                'batch': batches, 
+                'mut_type': dataset.df.MUTS, 
+                'WT_name': dataset.df.PDB})
         
+            if 'proteingym' in dataset_name:
+                tmp = pd.DataFrame({'ddG_pred': preds, 
+                                    'ddG_true': ddgs, 
+                                    'batch': batches, 
+                                    'mut_type': dataset.df.MUTS, 
+                                    'WT_name': dataset.df.PDB})
+
         # tmp['CENTRALITY'] = cent
         # tmp['CENTRALITY'] = cent_l
         # tmp = tmp.reset_index(drop=True)
@@ -211,7 +229,7 @@ def load_v2_dataset(cfg):
     dataset = cfg.data.dataset
     split = cfg.data.splits[0]
     # common splits: test, test_cdna2, homologue-free
-    print(dataset, )
+    print(dataset, split)
     if dataset == 'megascale' and split == 'test_cdna2':
         cfg.data_loc.megascale_csv = '/home/hdieckhaus/scripts/ThermoMPNN/data/cdna_mutate_everything/cdna2_test_ThermoMPNN.csv'
 
@@ -295,16 +313,24 @@ def load_v2_dataset(cfg):
                 pdb_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/PTMUL/pdbs')
                 csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/PTMUL/ptmul-5fold.csv')
 
+        elif 'proteingym' in dataset:
+            pdb_loc = os.path.join(cfg.data_loc.misc_data, 'protein-gym/ProteinGym_AF2_structures')
+            csv_loc = os.path.join(cfg.data_loc.misc_data, 'protein-gym/csvs')
+            csv_loc = os.path.join(csv_loc, split + '.csv')
+            ds = ProteinGymDataset(cfg, pdb_loc, csv_loc)
+            return ds
+
         return ds(cfg, pdb_loc, csv_loc, flip=flip)
 
 
 def zero_shot_convert(preds, positions, mut_AAs, wt_AAs=None):
     """Convert raw ProteinMPNN log-probs into ddG pseudo-values"""
-    ALPHABET = 'ACDEFGHIKLMNPQRSTVWYX'
+
     # index positions 
     preds = batched_index_select(preds, 1, positions)
     # index mutAA indices
     mut_logs = batched_index_select(preds, 2, mut_AAs)
+
     mut_logs = torch.squeeze(torch.squeeze(mut_logs, -1), -1)
     if wt_AAs is not None:
         wt_logs = torch.squeeze(torch.squeeze(batched_index_select(preds, 2, wt_AAs), -1), -1)

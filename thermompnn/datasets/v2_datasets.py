@@ -363,11 +363,21 @@ class ddgBenchDatasetv2(torch.utils.data.Dataset):
 
         if 'MUTS' in self.df.columns:
             mut_info = row.MUTS
+
+            if ('ptmul' in self.cfg.data.dataset) and ('double' not in self.cfg.data.mut_types):
+                if len(mut_info.split(';')) < 3: # skip double mutants if missing
+                    return
+            if ('ptmul' in self.cfg.data.dataset) and ('higher' not in self.cfg.data.mut_types):
+                if len(mut_info.split(';')) > 2: # skip higher order mutants if missing
+                    return
+
             # hack to run additive model on multi mutant datasets
-            # try:
-            #     mut_info = mut_info.split(';')[0]
-            # except IndexError:
-            #     mut_info = np.nan
+            if self.cfg.data.get('pick', None) is not None:
+                pick = self.cfg.data.get('pick', None)
+                try:
+                    mut_info = mut_info.split(';')[int(pick)]
+                except IndexError:
+                    mut_info = np.nan
 
         else:
             mut_info = row.MUT
@@ -375,13 +385,6 @@ class ddgBenchDatasetv2(torch.utils.data.Dataset):
         wt_list, mut_list, idx_list = [], [], []
         if mut_info is np.nan:  # to skip missing mutations for additive model
             return
-
-        if ('ptmul' in self.cfg.data.dataset) and ('double' not in self.cfg.data.mut_types):
-            if len(mut_info.split(';')) < 3: # skip double mutants if missing
-                return
-        if ('ptmul' in self.cfg.data.dataset) and ('higher' not in self.cfg.data.mut_types):
-            if len(mut_info.split(';')) > 2: # skip higher order mutants if missing
-                return
 
         # if True: # hacky cyclic prediction setup
         #     mt1, mt2 = mut_info.split(';')[::-1] # MT2_to_DM
@@ -587,80 +590,146 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
 
         self.cfg = cfg
         self.split = split  # which split to retrieve
-        fname = self.cfg.data_loc.megascale_csv
-        # only load rows needed to save memory
-        df = pd.read_csv(fname, usecols=["ddG_ML", "mut_type", "WT_name", "aa_seq"])
-        # remove unreliable data and insertion/deletion mutations
-        df = df.loc[df.ddG_ML != '-', :].reset_index(drop=True)
-        df = df.loc[~df.mut_type.str.contains("ins") & ~df.mut_type.str.contains("del"), :].reset_index(drop=True)
 
-        mut_list = []
-        if 'single' in self.cfg.data.mut_types:
-            mut_list.append(df.loc[~df.mut_type.str.contains(":") & ~df.mut_type.str.contains("wt"), :].reset_index(drop=True))
-        
-        if 'double' in self.cfg.data.mut_types:
-            tmp = df.loc[(df.mut_type.str.count(":") == 1) & (~df.mut_type.str.contains("wt")), :].reset_index(drop=True)
+        if ('cdna' in self.split) or ('denovo' in self.split):
+            # load ME dataset through separate process to ensure compatibility
+            if self.split == 'train_cdna': # combined training set
+                fname = '/home/hdieckhaus/scripts/ThermoMPNN/data/cdna_mutate_everything/cdna_train.csv'
+                df = pd.read_csv(fname)
+            elif self.split == 'test_cdna': # combined test set
+                fname1 = '/home/hdieckhaus/scripts/ThermoMPNN/data/cdna_mutate_everything/cdna1_test.csv'
+                fname2 = '/home/hdieckhaus/scripts/ThermoMPNN/data/cdna_mutate_everything/cdna2_test.csv'
+                df = pd.concat([
+                    pd.read_csv(fname1), 
+                    pd.read_csv(fname2)
+                ])
+                df['WT_name'] = df['pdb_id'].str.upper() + '.pdb'
+                df['ddG_ML'] = df['ddg']
+
+            elif self.split == 'denovo':
+                fname1 = '/home/hdieckhaus/scripts/ThermoMPNN/data/cdna_mutate_everything/denovo_singles.csv'
+                fname2 = '/home/hdieckhaus/scripts/ThermoMPNN/data/cdna_mutate_everything/denovo_doubles.csv'
+                df = pd.concat([
+                    pd.read_csv(fname1), 
+                    pd.read_csv(fname2)
+                ])
+                df['WT_name'] = df['pdb_id'] + '.pdb'
+                df['ddG_ML'] = df['ddg'] * -1
+
+                            
+            # convert columns to expected names/formats
+            df['aa_seq'] = df['mut_seq']
             
-            # Remove hidden single mutations as these are unreliable
-            mut = tmp.mut_type.values
-            mut1 = [m.split(':')[0] for m in mut]
-            mut2 = [m.split(':')[-1] for m in mut]
-            flag = [m[0] == m[-1] for m in mut1] or [m[0] == m[-1] for m in mut2]
-            flag = ~np.array(flag)
-            tmp = tmp.loc[flag]
-            mut_list.append(tmp)
-            
-        self.df = pd.concat(mut_list, axis=0).reset_index(drop=True)  # this includes points missing structure data
-        
-        # load splits produced by mmseqs clustering
-        with open(self.cfg.data_loc.megascale_splits, 'rb') as f:
-            splits = pickle.load(f)
+            df['mut_type'] = df['mut_info']
 
-        self.wt_names = splits[self.split]
+            # select singles/doubles
+            singles = df.loc[~df.mut_type.str.contains(':')]
+            doubles = df.loc[df.mut_type.str.contains(':')]
 
-        # pre-loading wildtype structures - can avoid later file I/O for 50% of data points
-        self.side_chains = self.cfg.data.get('side_chains', False)
-        self.pdb_data = {}
-        for wt_name in tqdm(self.wt_names):
-            wt_name = wt_name.split(".pdb")[0].replace("|",":")
-            pdb_file = os.path.join(self.cfg.data_loc.megascale_pdbs, f"{wt_name}.pdb")
-            pdb = parse_PDB(pdb_file, side_chains=self.side_chains)
-            # load each ESM embedding in its totality
-            if self.cfg.model.auxiliary_embedding == 'localESM':
-                embed = get_esm(self.cfg.data_loc.esm_data, self.cfg.data.dataset, wt_name, '_esm8M.pt') # [L, EMBED]
-                pdb[0]['esm'] = embed
-            self.pdb_data[wt_name] = pdb[0]
+            # select singles/doubles
+            mut_list = []
+            if 'single' in self.cfg.data.mut_types:
+                mut_list.append(singles)
+            if 'double' in self.cfg.data.mut_types:
+                mut_list.append(doubles)
 
-        # filter df for only data with structural data
-        self.df = self.df.loc[self.df.WT_name.isin(self.wt_names)].reset_index(drop=True)
-         
-        df_list = []
-        # pick which mutations to use (data augmentation)
-        if ('single' in self.cfg.data.mut_types) or ('double' in self.cfg.data.mut_types):
-            print('Including %s direct single/double mutations' % str(self.df.shape[0]))
+            self.df = pd.concat(mut_list, axis=0).reset_index(drop=True)
             self.df['DIRECT'] = True
-            self.df['wt_orig'] = self.df['mut_type'].str[0]  # mark original WT for file loading use
-            df_list.append(self.df)
-            
-        if 'double-aug' in cfg.data.mut_types:
-            # grab single mutants even if not included in mutation type list
-            tmp = df.loc[~df.mut_type.str.contains(":") & ~df.mut_type.str.contains("wt"), :].reset_index(drop=True)
-            tmp = tmp.loc[tmp.WT_name.isin(self.wt_names)].reset_index(drop=True) # filter by split
-            
-            double_aug = self._augment_double_mutants(tmp, c=1)
-            print('Generated %s augmented double mutations' % str(double_aug.shape[0]))
-            double_aug['DIRECT'] = False
-            self.tmp = tmp
-            df_list.append(double_aug)
-        
-        if self.split == 'test':
-            self.df = pd.concat(df_list, axis=0).reset_index(drop=True)
+            self.df['wt_orig'] = self.df['mut_type'].str[0]
+            self.wt_names = self.df.WT_name.unique()
+
+            # load PDB data
+            self.side_chains = self.cfg.data.get('side_chains', False)
+            self.pdb_data = {}
+            for wt_name in tqdm(self.wt_names):
+                wt_name = wt_name.split(".pdb")[0].replace("|",":")
+                pdb_file = os.path.join(self.cfg.data_loc.megascale_pdbs, f"{wt_name}.pdb")
+                pdb = parse_PDB(pdb_file, side_chains=self.side_chains)
+                self.pdb_data[wt_name] = pdb[0]
+
+            # handle augmentation - add to df
+            if 'double-aug' in self.cfg.data.mut_types:
+                double_aug = self._augment_double_mutants(singles, c=1)
+                print('Generated %s augmented double mutations' % str(double_aug.shape[0]))
+                double_aug['DIRECT'] = False
+                self.df = pd.concat([self.df, double_aug], axis=0).reset_index(drop=True)
         else:
-            self.df = pd.concat(df_list, axis=0).sort_values(by='WT_name').reset_index(drop=True)
-        
-        epi = cfg.data.epi if 'epi' in cfg.data else False
-        if epi:
-            self._generate_epi_dataset()
+            fname = self.cfg.data_loc.megascale_csv
+            # only load rows needed to save memory
+            df = pd.read_csv(fname, usecols=["ddG_ML", "mut_type", "WT_name", "aa_seq"])
+            # remove unreliable data and insertion/deletion mutations
+            df = df.loc[df.ddG_ML != '-', :].reset_index(drop=True)
+            df = df.loc[~df.mut_type.str.contains("ins") & ~df.mut_type.str.contains("del"), :].reset_index(drop=True)
+
+            mut_list = []
+            if 'single' in self.cfg.data.mut_types:
+                mut_list.append(df.loc[~df.mut_type.str.contains(":") & ~df.mut_type.str.contains("wt"), :].reset_index(drop=True))
+            
+            if 'double' in self.cfg.data.mut_types:
+                tmp = df.loc[(df.mut_type.str.count(":") == 1) & (~df.mut_type.str.contains("wt")), :].reset_index(drop=True)
+                
+                # Remove hidden single mutations as these are unreliable
+                mut = tmp.mut_type.values
+                mut1 = [m.split(':')[0] for m in mut]
+                mut2 = [m.split(':')[-1] for m in mut]
+                flag = [m[0] == m[-1] for m in mut1] or [m[0] == m[-1] for m in mut2]
+                flag = ~np.array(flag)
+                tmp = tmp.loc[flag]
+                tmp['dupe'] = tmp['WT_name'] + '_' + tmp['mut_type']
+                tmp = tmp.drop_duplicates(subset=['dupe']).reset_index(drop=True)
+                mut_list.append(tmp)
+                
+            self.df = pd.concat(mut_list, axis=0).reset_index(drop=True)  # this includes points missing structure data
+            
+            # load splits produced by mmseqs clustering
+            with open(self.cfg.data_loc.megascale_splits, 'rb') as f:
+                splits = pickle.load(f)
+
+            self.wt_names = splits[self.split]
+
+            # pre-loading wildtype structures - can avoid later file I/O for 50% of data points
+            self.side_chains = self.cfg.data.get('side_chains', False)
+            self.pdb_data = {}
+            for wt_name in tqdm(self.wt_names):
+                wt_name = wt_name.split(".pdb")[0].replace("|",":")
+                pdb_file = os.path.join(self.cfg.data_loc.megascale_pdbs, f"{wt_name}.pdb")
+                pdb = parse_PDB(pdb_file, side_chains=self.side_chains)
+                # load each ESM embedding in its totality
+                if self.cfg.model.auxiliary_embedding == 'localESM':
+                    embed = get_esm(self.cfg.data_loc.esm_data, self.cfg.data.dataset, wt_name, '_esm8M.pt') # [L, EMBED]
+                    pdb[0]['esm'] = embed
+                self.pdb_data[wt_name] = pdb[0]
+
+            # filter df for only data with structural data
+            self.df = self.df.loc[self.df.WT_name.isin(self.wt_names)].reset_index(drop=True)
+            
+            df_list = []
+            # pick which mutations to use (data augmentation)
+            if ('single' in self.cfg.data.mut_types) or ('double' in self.cfg.data.mut_types):
+                print('Including %s direct single/double mutations' % str(self.df.shape[0]))
+                self.df['DIRECT'] = True
+                self.df['wt_orig'] = self.df['mut_type'].str[0]  # mark original WT for file loading use
+                df_list.append(self.df)
+                
+            if 'double-aug' in cfg.data.mut_types:
+                # grab single mutants even if not included in mutation type list
+                tmp = df.loc[~df.mut_type.str.contains(":") & ~df.mut_type.str.contains("wt"), :].reset_index(drop=True)
+                tmp = tmp.loc[tmp.WT_name.isin(self.wt_names)].reset_index(drop=True) # filter by split
+                
+                double_aug = self._augment_double_mutants(tmp, c=1)
+                print('Generated %s augmented double mutations' % str(double_aug.shape[0]))
+                double_aug['DIRECT'] = False
+                self.tmp = tmp
+                df_list.append(double_aug)
+            
+            if self.split == 'test':
+                self.df = pd.concat(df_list, axis=0).reset_index(drop=True)
+            else:
+                self.df = pd.concat(df_list, axis=0).sort_values(by='WT_name').reset_index(drop=True)
+            
+            epi = cfg.data.epi if 'epi' in cfg.data else False
+            if epi:
+                self._generate_epi_dataset()
 
         self._sort_dataset()
         print('Final Dataset Size: %s ' % str(self.df.shape[0])) 
@@ -685,37 +754,10 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
         mt = row.mut_type  # only single mutations for now
         direct = row.DIRECT
         # need to retrieve file and compile mutation object
-        # print(mt)
-        # mt = row.mut_type.split(':')[0] # hacky way of running additive model on multi mutant datasets
-        # mt = row.mut_type.split(':')[1] # hacky way of running additive model on multi mutant datasets
-        # TODO configure as a real option
-        # if True: # hacky cyclic prediction setup
-        #     # mt1, mt2 = mt.split(':')[::-1] # MT2_to_DM
-        #     mt1, mt2 = mt.split(':') # MT1_to_DM
+        if self.cfg.data.get('pick', None) is not None:
+            pick = self.cfg.data.get('pick', None)
+            mt = row.mut_type.split(':')[pick] # hacky way of running additive model on multi mutant datasets
 
-        #     wtAA1, pos1, mutAA1 = mt1[0], int(mt1[1:-1]) - 1, mt1[-1]
-        #     wtAA2, pos2, mutAA2 = mt2[0], int(mt2[1:-1]) - 1, mt2[-1]
-
-        #     # impute MUT1 into WT PDB data to form chimeric WT-MUT1 input
-        #     pdb = self.pdb_data[row.WT_name.removesuffix('.pdb')]
-        #     real_pdb = deepcopy(pdb)
-        #     assert real_pdb['seq'][pos1] == wtAA1
-        #     seq = [ch for ch in real_pdb['seq']]
-        #     seq[pos1] = mutAA1
-        #     real_pdb['seq'] = ''.join(seq)
-
-        #     seq = [ch for ch in real_pdb['seq_chain_A']]
-        #     seq[pos1] = mutAA1
-        #     real_pdb['seq_chain_A'] = ''.join(seq)
-
-        #     assert real_pdb['seq'][pos1] == mutAA1
-        #     assert real_pdb['seq'][pos2] == wtAA2
-            
-        #     # use mt2 as "real mutation" in single-mutant model
-        #     tmp_pdb = deepcopy(real_pdb)
-        #     ddG = -np.inf
-        #     tmp_pdb['mutation'] = Mutation([pos2], [wtAA2], [mutAA2], ddG, row.WT_name)
-        #     return tmp_pdb
 
         # four options: single, rev, double, double-rev
         if len(mt.split(':')) > 1: # double
@@ -1222,7 +1264,6 @@ class SKEMPIDoubleDataset(torch.utils.data.Dataset):
         return tmp_pdb
     
 
-
 class S487Dataset(torch.utils.data.Dataset):
     
     def __init__(self, cfg, csv_file, pdb_loc):
@@ -1518,20 +1559,75 @@ class BinderSSMDatasetOmar(torch.utils.data.Dataset):
         tmp['mutation'] = mutation
         return tmp  
         
-         
-class ComboDataset(torch.utils.data.Dataset):
-    def __init__(self, cfg, split, csv_loc, pdb_loc, split_loc):
-        datasets = [
-            MegaScaleDatasetv2(cfg, split), 
-            BinderSSMDataset(cfg, split, csv_loc, pdb_loc, split_loc) 
-        ]
-        self.dataset = torch.utils.data.ConcatDataset(datasets)
-    
+
+class ProteinGymDataset(torch.utils.data.Dataset):
+
+    def __init__(self, cfg, pdb_dir, csv_fname):
+
+        self.cfg = cfg
+        self.pdb_dir = pdb_dir
+        df = pd.read_csv(csv_fname)
+        self.df = df
+
+        self.wt_seqs = {}
+        self.mut_rows = {}
+        self.wt_names = df.PDB.unique()
+                 
+        self.pdb_data = {}
+        self.side_chains = self.cfg.data.get('side_chains', False)
+        # parse all PDBs first - treat each row as its own PDB
+        pdbs = self.df.PDB.unique()
+        for p in tqdm(pdbs):
+            fname = p[:-1]
+            pdb_file = os.path.join(self.pdb_dir, f"{fname}.pdb")
+            chain = [p[-1]]
+            pdb = alt_parse_PDB(pdb_file, input_chain_list=chain, side_chains=self.side_chains)
+            self.pdb_data[p] = pdb[0]
+            
     def __len__(self):
-        return len(self.dataset)
-    
+        return self.df.shape[0]
+
     def __getitem__(self, index):
-        return self.dataset[index]
+        """Batch retrieval fxn - do each row as its own item, for simplicity"""
+
+        row = self.df.iloc[index]
+        pdb_CANONICAL = self.pdb_data[row.PDB]
+
+        if 'MUTS' in self.df.columns:
+            mut_info = row.MUTS
+
+            # hack to run additive model on multi mutant datasets
+            if self.cfg.data.get('pick', None) is not None:
+                pick = self.cfg.data.get('pick', None)
+                try:
+                    mut_info = mut_info.split(';')[int(pick)]
+                except IndexError:
+                    mut_info = np.nan
+
+        else:
+            mut_info = row.MUT
+
+        wt_list, mut_list, idx_list = [], [], []
+        if mut_info is np.nan:  # to skip missing mutations for additive model
+            return
+
+        for mt in mut_info.split(';'):  # handle multiple mutations like for megascale
+            
+            wtAA, mutAA = mt[0], mt[-1]
+            ddG = float(row.DDG) * -1
+            
+            pdb = deepcopy(pdb_CANONICAL)      
+            pdb_idx = int(mt[1:-1]) - 1
+            assert pdb['seq'][pdb_idx] == wtAA
+            
+            wt_list.append(wtAA)
+            mut_list.append(mutAA)
+            idx_list.append(pdb_idx)
+            pdb['mutation'] = Mutation(idx_list, wt_list, mut_list, ddG, row.PDB[:-1])
+
+        tmp = deepcopy(pdb)  # this is hacky but it is needed or else it overwrites all PDBs with the last data point
+        return tmp
+
 
 
 def get_esm(location, dataset, pdb, suffix):
@@ -1563,39 +1659,39 @@ if __name__ == "__main__":
     cfg = OmegaConf.merge(OmegaConf.load(sys.argv[1]), OmegaConf.load(sys.argv[2]))
     cfg = parse_cfg(cfg)
 
-    # seed = 333
-    # cfg.data.seed = seed
-    # # prefetch augmented dataset; save to disk for embedding use
-    # for split in ['train', 'val', 'test']:
-    #     ds = MegaScaleDatasetv2(cfg, split=split)
-    #     print(ds.df)
-    #     ds.df.to_csv(f'Prefetch_Mega_{split}_{seed}.csv')
+    seed = 111 # SEEDS: 111, 222, and 333 for ESM trials
+    cfg.data.seed = seed
+    # prefetch augmented dataset; save to disk for embedding use
+    for split in ['train_ptmul']: #, 'val', 'test']:
+        ds = MegaScaleDatasetv2(cfg, split=split)
+        print(ds.df)
+        ds.df.to_csv(f'Prefetch_Mega_{split}_{seed}.csv')
     
     # PTMUL df retrieval (w/aligned positions)
-    pdb_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/PTMUL/pdbs')
-    csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/PTMUL/ptmul-5fold-mutateeverything_FINAL.csv')
-    ds = ddgBenchDatasetv2(cfg=cfg, csv_fname=csv_loc, pdb_dir=pdb_loc)
-    pos1_list, pos2_list = [], []
-    seq_list = []
-    for batch in tqdm(ds):
-        if batch is not None:
-            plist = batch['mutation'].position
-            seq_list.append(batch['seq'])
-            pos1_list.append(plist[0])
-            pos2_list.append(plist[1])
-        else:
-            pos1_list.append(None)
-            pos2_list.append(None)
-            seq_list.append(None)
+    # pdb_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/PTMUL/pdbs')
+    # csv_loc = os.path.join(cfg.data_loc.misc_data, 'protddg-bench-master/PTMUL/ptmul-5fold-mutateeverything_FINAL.csv')
+    # ds = ddgBenchDatasetv2(cfg=cfg, csv_fname=csv_loc, pdb_dir=pdb_loc)
+    # pos1_list, pos2_list = [], []
+    # seq_list = []
+    # for batch in tqdm(ds):
+    #     if batch is not None:
+    #         plist = batch['mutation'].position
+    #         seq_list.append(batch['seq'])
+    #         pos1_list.append(plist[0])
+    #         pos2_list.append(plist[1])
+    #     else:
+    #         pos1_list.append(None)
+    #         pos2_list.append(None)
+    #         seq_list.append(None)
     
-    ds.df['Pos1_Aligned'] = pos1_list
-    ds.df['Pos2_Aligned'] = pos2_list
-    ds.df['Seq_Aligned'] = seq_list
-    ds.df = ds.df.loc[ds.df['NMUT'] == 2]
-    print(ds.df.head)
-    ds.df['Pos1_Aligned'] = ds.df['Pos1_Aligned'].astype(int)
-    ds.df['Pos2_Aligned'] = ds.df['Pos2_Aligned'].astype(int)
-    ds.df.to_csv('PTMUL-aligned.csv')
+    # ds.df['Pos1_Aligned'] = pos1_list
+    # ds.df['Pos2_Aligned'] = pos2_list
+    # ds.df['Seq_Aligned'] = seq_list
+    # ds.df = ds.df.loc[ds.df['NMUT'] == 2]
+    # print(ds.df.head)
+    # ds.df['Pos1_Aligned'] = ds.df['Pos1_Aligned'].astype(int)
+    # ds.df['Pos2_Aligned'] = ds.df['Pos2_Aligned'].astype(int)
+    # ds.df.to_csv('PTMUL-aligned.csv')
     
     # csvf = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/SKEMPIv2/SKEMPI_v2_single.csv'
     # pdbd = '/proj/kuhl_lab/users/dieckhau/ThermoMPNN/data/SKEMPIv2/PDBs'
