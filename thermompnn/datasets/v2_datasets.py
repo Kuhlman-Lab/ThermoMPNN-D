@@ -373,45 +373,6 @@ class ddgBenchDatasetv2(torch.utils.data.Dataset):
         if mut_info is np.nan:  # to skip missing mutations for additive model
             return
 
-        # if True: # hacky cyclic prediction setup
-        #     mt1, mt2 = mut_info.split(';')[::-1] # MT2_to_DM
-        #     # mt1, mt2 = mut_info.split(';') # MT1_to_DM
-
-        #     wtAA1, pos1, mutAA1 = mt1[0], int(mt1[1:-1]) - 1, mt1[-1]
-        #     wtAA2, pos2, mutAA2 = mt2[0], int(mt2[1:-1]) - 1, mt2[-1]
-
-        #     # impute MUT1 into WT PDB data to form chimeric WT-MUT1 input
-        #     real_pdb = deepcopy(pdb_CANONICAL)
-        #     pdb_idx1 = self._get_pdb_idx(mt1, pdb_CANONICAL)
-        #     assert real_pdb['seq'][pdb_idx1] == wtAA1
-        #     pdb_idx2 = self._get_pdb_idx(mt2, pdb_CANONICAL)
-        #     assert real_pdb['seq'][pdb_idx2] == wtAA2
-
-        #     seq_keys = [k for k in real_pdb.keys() if k.startswith('seq')]
-        #     if len(seq_keys) > 2:
-        #         raise ValueError("Maximum of 2 seq fields expected in PDB, %s seq fields found instead" % str(len(seq_keys)))
-        #     for sk in seq_keys:
-        #         tmp = [p for p in real_pdb[sk]]
-        #         tmp[pdb_idx1] = mutAA1
-        #         real_pdb[sk] = ''.join(tmp)   
-        #     # assert real_pdb['seq'][pos1] == wtAA1
-        #     # seq = [ch for ch in real_pdb['seq']]
-        #     # seq[pos1] = mutAA1
-        #     # real_pdb['seq'] = ''.join(seq)
-
-        #     # seq = [ch for ch in real_pdb['seq_chain_A']]
-        #     # seq[pos1] = mutAA1
-        #     # real_pdb['seq_chain_A'] = ''.join(seq)
-
-        #     # assert real_pdb['seq'][pos1] == mutAA1
-        #     # assert real_pdb['seq'][pos2] == wtAA2
-            
-        #     # use mt2 as "real mutation" in single-mutant model
-        #     tmp_pdb = deepcopy(real_pdb)
-        #     ddG = -np.inf
-        #     tmp_pdb['mutation'] = Mutation([pdb_idx2], [wtAA2], [mutAA2], ddG, row.PDB[:-1])
-        #     return tmp_pdb
-
         if not self.rev:
             for mt in mut_info.split(';'):  # handle multiple mutations like for megascale
                 

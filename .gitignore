@@ -138,7 +138,6 @@ artifacts
 extra_utils
 .idea/
 preprocessing/.ipynb_checkpoints
-configs/
 proteinmpnn/models
 *.csv
 inbox/
@@ -146,4 +145,5 @@ test.yaml
 test.sh
 proteinmpnn/*
 
+*.pdf
 jobs

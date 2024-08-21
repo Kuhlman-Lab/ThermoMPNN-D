@@ -9,10 +9,9 @@ from thermompnn.trainer.trainer_utils import get_metrics
 
 class TransferModelPLv2(pl.LightningModule):
     """Batched trainer module"""
-    def __init__(self, cfg, train_dataset, val_dataset):
+    def __init__(self, cfg):
         super().__init__()
         self.model = TransferModelv2(cfg)
-        self.train_dataset, self.val_dataset = train_dataset, val_dataset
 
         self.cfg = cfg
         self.dev = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
@@ -24,7 +23,7 @@ class TransferModelPLv2(pl.LightningModule):
             
             for out in self.out:
                 self.metrics[split][out] = nn.ModuleDict()
-                for name, metric in get_metrics(self.cfg.model.classifier).items():
+                for name, metric in get_metrics(False).items():
                     self.metrics[split][out][name] = metric
 
     def forward(self, *args):
@@ -118,11 +117,10 @@ class TransferModelPLv2(pl.LightningModule):
 
 class TransferModelPLv2Siamese(pl.LightningModule):
     """Batched trainer module"""
-    def __init__(self, cfg, train_dataset, val_dataset):
+    def __init__(self, cfg):
         super().__init__()
         print('Multi-mutant siamese network enabled!')
         self.model = TransferModelv2Siamese(cfg)
-        self.train_dataset, self.val_dataset = train_dataset, val_dataset
         self.cfg = cfg
         self.dev = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
         self.ALPHA = self.cfg.model.alpha # weight for avg MSE loss term

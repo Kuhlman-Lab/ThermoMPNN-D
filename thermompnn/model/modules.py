@@ -6,7 +6,7 @@ import os
 import numpy as np
 
 from thermompnn.protein_mpnn_utils import ProteinMPNN
-from protein_mpnn_utils import gather_nodes, gather_edges, DecLayer, cat_neighbors_nodes, PositionWiseFeedForward
+from thermompnn.protein_mpnn_utils import gather_nodes, gather_edges, DecLayer, cat_neighbors_nodes, PositionWiseFeedForward
 
 
 def get_protein_mpnn(cfg, version='v_48_020.pt'):

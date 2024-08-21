@@ -315,17 +315,7 @@ class TransferModelv2(nn.Module):
             # vectorized indexing of the embeddings (this is very ugly but the best I can do for now)
             mpnn_embed = torch.gather(mpnn_embed, 1, mut_positions.unsqueeze(-1).expand(mut_positions.size(0), mut_positions.size(1), mpnn_embed.size(2)))
             mpnn_embed = torch.squeeze(mpnn_embed, 1) # final shape: (batch, embed_dim)
-            if self.cfg.model.auxiliary_embedding == 'globalMPNN': 
-                global_embed = all_mpnn_hid[..., :128]
-                ge_mask = global_embed != 0.
-                global_embed = (global_embed * ge_mask).sum(dim = -2) / ge_mask.sum(dim = -2) # masked mean, output: [B, EMB]
-                mpnn_embed = torch.cat([mpnn_embed, global_embed], dim = -1)
-            
-            if self.cfg.model.auxiliary_embedding == 'localESM':
-                # do batched indexing
-                esm_emb = torch.squeeze(torch.gather(esm_emb, 1, mut_positions.unsqueeze(-1).expand(mut_positions.size(0), mut_positions.size(1), esm_emb.size(2))), 1)
-                mpnn_embed = torch.cat([mpnn_embed, esm_emb], dim = -1)            
-            
+
             if self.cfg.model.lightattn:
                 mpnn_embed = torch.unsqueeze(mpnn_embed, -1)  # shape for LA input: (batch, embed_dim, seq_length=1)
                 mpnn_embed = self.light_attention(mpnn_embed)  # shape for LA output: (batch, embed_dim)

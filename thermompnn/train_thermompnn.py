@@ -39,7 +39,6 @@ def parse_cfg(cfg):
     cfg.training.learn_rate = cfg.training.get('learn_rate', 0.0001)
     cfg.training.mpnn_learn_rate = cfg.training.get('mpnn_learn_rate', None)
     cfg.training.lr_schedule = cfg.training.get('lr_schedule', True)
-    cfg.training.ckpt = cfg.training.get('ckpt', None)
 
     # model config
     cfg.model = cfg.get('model', {})
@@ -89,18 +88,13 @@ def train(cfg):
                                 batch_size=cfg.training.batch_size)
 
     if cfg.model.aggregation == 'siamese':
-        model_pl = TransferModelPLv2Siamese(cfg, train_dataset, val_dataset)
+        model_pl = TransferModelPLv2Siamese(cfg)
     else:
-        model_pl = TransferModelPLv2(cfg, train_dataset, val_dataset)
-
-    if cfg.training.ckpt is not None:
-        print('Loading TL model from checkpoint!')
-        model_pl.model = TransferModelPLv2.load_from_checkpoint(cfg.training.ckpt, cfg=cfg, map_location='cuda').model
+        model_pl = TransferModelPLv2(cfg)
     
     # additional params, logging, checkpoints for training
     filename = cfg.name + '_{epoch:02d}_{val_ddG_spearman:.02}'
     monitor = f'val_ddG_spearman'
-
 
     checkpoint_callback = ModelCheckpoint(monitor=monitor, mode='max', dirpath='checkpoints', filename=filename)
     logger = WandbLogger(project=cfg.project, name="test", log_model=False) if cfg.project is not None else None

@@ -38,7 +38,6 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
         if batch is None:
             continue
         X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask = batch
-
         X = X.to(device)
         S = S.to(device)
         mask = mask.to(device)
@@ -95,13 +94,6 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
             'mut_type': dataset.df.mut_type, 
             'WT_name': dataset.df.WT_name})
 
-        elif 'fireprot' in dataset_name:
-            dataset.df.pdb_position = dataset.df.pdb_position.astype(str)
-            tmp = pd.DataFrame({'ddG_pred': preds, 
-                                'ddG_true': ddgs, 
-                                'batches': batches, 
-                                'mut_type': dataset.df.wild_type + dataset.df.pdb_position + dataset.df.mutation,
-                                'WT_name': dataset.df.pdb_id_corrected})
         else:
             if 'ptmul' in dataset_name: # manually correct for subset inference df size mismatch
                 dataset.df = dataset.df.loc[dataset.df.NMUT < 3].reset_index(drop=True)
@@ -111,14 +103,19 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
                 'mut_type': dataset.df.MUTS, 
                 'WT_name': dataset.df.PDB})
         
-            if 'proteingym' in dataset_name:
+            elif 'proteingym' in dataset_name:
                 tmp = pd.DataFrame({'ddG_pred': preds, 
                                     'ddG_true': ddgs, 
                                     'batch': batches, 
                                     'mut_type': dataset.df.MUTS, 
                                     'WT_name': dataset.df.PDB})
 
-        tmp.to_csv(f'ThermoMPNN_{os.path.basename(name).removesuffix(".ckpt")}_{dataset_name}_preds.csv')
+            else:
+                tmp = pd.DataFrame()
+
+    else:
+        tmp = pd.DataFrame()
+        # tmp.to_csv(f'ThermoMPNN_{os.path.basename(name).removesuffix(".ckpt")}_{dataset_name}_preds.csv')
 
     column = {
         "Model": name,
@@ -131,8 +128,8 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
                 print(met_name, column[f"{dtype} {met_name}"])
             except ValueError:
                 pass
-    results.append(column)
-    return results
+
+    return tmp
 
 
 def load_v2_dataset(cfg):
