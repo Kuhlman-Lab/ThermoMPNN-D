@@ -1,5 +1,6 @@
 import sys
 import wandb
+import os
 from torch.utils.data import DataLoader
 
 import pytorch_lightning as pl
@@ -95,8 +96,13 @@ def train(cfg):
     # additional params, logging, checkpoints for training
     filename = cfg.name + '_{epoch:02d}_{val_ddG_spearman:.02}'
     monitor = f'val_ddG_spearman'
+    
+    current_location = os.path.dirname(os.path.realpath(__file__))
+    checkpath = os.path.join(current_location, 'checkpoints/')
+    if not os.path.isdir(checkpath):
+        os.mkdir(checkpath)
 
-    checkpoint_callback = ModelCheckpoint(monitor=monitor, mode='max', dirpath='checkpoints', filename=filename)
+    checkpoint_callback = ModelCheckpoint(monitor=monitor, mode='max', dirpath=checkpath, filename=filename)
     logger = WandbLogger(project=cfg.project, name="test", log_model=False) if cfg.project is not None else None
     n_steps = 100
     
@@ -115,7 +121,7 @@ def train(cfg):
 if __name__ == "__main__":
     # config.yaml and local.yaml files are combined to assemble all runtime arguments
     if len(sys.argv) != 3:
-        raise ValueError("Need to specify exactly two config files (config.yaml and local.yaml)")
+        raise ValueError("Need to specify exactly two config files.")
     
     cfg = OmegaConf.merge(OmegaConf.load(sys.argv[1]), OmegaConf.load(sys.argv[2]))
     train(cfg)

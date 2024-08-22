@@ -322,7 +322,8 @@ def alt_parse_PDB(path_to_pdb, input_chain_list=None, ca_only=False, side_chains
             else:
                 sidechain_atoms = ['N', 'CA', 'C', 'O']
             xyz, seq, resn_list = alt_parse_PDB_biounits(biounit, atoms=sidechain_atoms, chain=letter)
-
+            if resn_list != 'no_chain':
+                my_dict['resn_list'] = resn_list
                 
             if type(xyz) != str:
                 concat_seq += seq[0]
@@ -354,7 +355,7 @@ def alt_parse_PDB(path_to_pdb, input_chain_list=None, ca_only=False, side_chains
         my_dict['seq'] = concat_seq
 
         # old handling for resn lists
-        my_dict['resn_list'] = list(resn_list)
+        # my_dict['resn_list'] = list(resn_list)
         if s <= len(chain_alphabet):
             pdb_dict_list.append(my_dict)
             c += 1

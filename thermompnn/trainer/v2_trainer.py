@@ -23,7 +23,7 @@ class TransferModelPLv2(pl.LightningModule):
             
             for out in self.out:
                 self.metrics[split][out] = nn.ModuleDict()
-                for name, metric in get_metrics(False).items():
+                for name, metric in get_metrics(False, False).items():
                     self.metrics[split][out][name] = metric
 
     def forward(self, *args):
@@ -46,11 +46,7 @@ class TransferModelPLv2(pl.LightningModule):
         for out in self.out:
             for metric in self.metrics[f"{prefix}_metrics"][out].values():
                 try:
-                    if self.cfg.model.classifier:
-                        metric.update(torch.argmax(preds, dim=-1), mut_ddGs)
-                    
-                    else:
-                        metric.update(torch.squeeze(preds), torch.squeeze(mut_ddGs))
+                    metric.update(torch.squeeze(preds), torch.squeeze(mut_ddGs))
                 except IndexError:
                     continue
 
@@ -134,7 +130,7 @@ class TransferModelPLv2Siamese(pl.LightningModule):
             for out in self.out:
                 self.metrics[split][out] = nn.ModuleDict()
                 sym = self.cfg.model.aggregation == 'siamese'
-                for name, metric in get_metrics(True, sym).items():
+                for name, metric in get_metrics(False, sym).items():
                     self.metrics[split][out][name] = metric
 
     def forward(self, *args):
@@ -149,8 +145,6 @@ class TransferModelPLv2Siamese(pl.LightningModule):
         # symmetric loss function
         pred_ddG_avg = (pred_ddG_A + pred_ddG_B) / 2.
         pred_ddG_sym = torch.abs(pred_ddG_A - pred_ddG_B) / 2.
-        # relative loss weights (hyperparameters to tune)
-
         mse = self.ALPHA * F.mse_loss(pred_ddG_avg, mut_ddGs) + self.BETA * torch.mean(pred_ddG_sym)
 
         for out in self.out:

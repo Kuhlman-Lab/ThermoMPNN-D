@@ -1,0 +1,32 @@
+# project: ThermoMPNN_v2
+# name: epistatic
+
+data:
+  dataset: megascale
+  mut_types: [double, double-aug]
+  splits: [train, val]
+  range: 3
+
+training:
+  num_workers: 24
+  learn_rate: 0.00001
+  epochs: 100
+  lr_schedule: true
+  batch_size: 256
+  shuffle: true
+
+model:
+  hidden_dims: [128, 128]
+  subtract_mut: false
+  mutant_embedding: true
+  single_target: true
+  num_final_layers: 2
+  freeze_weights: true
+  load_pretrained: true
+  lightattn: true
+  aggregation: siamese
+  proteinmpnn_dropout: 0.0
+  alpha: 1.0
+  beta: 1.0
+  edges: true
+  dropout: 0.1
