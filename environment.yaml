@@ -1,4 +1,4 @@
-name: thermoMPNN
+name: ThermoMPNN-D
 channels:
   - bioconda
   - anaconda
@@ -7,10 +7,10 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - pytorch
+  - pytorch=*=*cuda*
   - pytorch-cuda=11.7
-  - torchvision
-  - torchaudio
+  - torchvision=*=*cu*
+  - torchaudio=*=*cu*
   - torchmetrics
   - pytorch-lightning
   - biopython
@@ -23,3 +23,8 @@ dependencies:
   - python==3.10
   - joblib
   - cudatoolkit=11.3
+  - scipy
+  - scikit-learn
+  - ipykernel
+  - notebook
+  
