@@ -24,7 +24,7 @@ Add ThermoMPNN to your ```PYTHONPATH``` so that python can find all the modules:
 export PYTHONPATH=$PYTHONPATH:/path/to/ThermoMPNN-D
 ```
 
-Finally, modify the local filepath information found in ```ThermoMPNN/examples/configs/local.yaml``` to match your system.
+Finally, modify the local filepath information found in ```examples/configs/local.yaml``` to match your system.
 
 Before running any ThermoMPNN-D scripts, just run ```mamba activate ThermoMPNN-D``` to load the necessary python packages.
 
