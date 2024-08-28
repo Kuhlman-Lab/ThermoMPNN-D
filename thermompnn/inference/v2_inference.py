@@ -28,8 +28,9 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
     
     print('Testing Model %s on dataset %s' % (name, dataset_name))
     preds, ddgs = [], []
+    INDELS = True # TODO repair
 
-    loader = DataLoader(dataset, collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.get('side_chains', False)), 
+    loader = DataLoader(dataset, collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.get('side_chains', False), indels=INDELS, torsions=cfg.data.torsions), 
                         shuffle=False, num_workers=cfg.training.get('num_workers', 8), batch_size=cfg.training.get('batch_size', 256))
 
     batches = []
@@ -38,6 +39,7 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
         if batch is None:
             continue
         X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask = batch
+
         X = X.to(device)
         S = S.to(device)
         mask = mask.to(device)
@@ -50,7 +52,7 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
         mut_mutant_AAs = mut_mutant_AAs.to(device)
         mut_ddGs = mut_ddGs.to(device)
         atom_mask = torch.Tensor(atom_mask).to(device)
-
+        
         if cfg.model.get('aggregation', '') == 'siamese':
             # average both siamese network passes
             predA, predB = model(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask)
@@ -115,7 +117,7 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
 
     else:
         tmp = pd.DataFrame()
-        # tmp.to_csv(f'ThermoMPNN_{os.path.basename(name).removesuffix(".ckpt")}_{dataset_name}_preds.csv')
+    tmp.to_csv(f'ThermoMPNN_{os.path.basename(name).removesuffix(".ckpt")}_{dataset_name}_preds.csv')
 
     column = {
         "Model": name,

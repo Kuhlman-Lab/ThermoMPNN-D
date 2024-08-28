@@ -15,9 +15,12 @@ from thermompnn.datasets.dataset_utils import Mutation, seq1_index_to_seq2_index
 
 
 def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict=None, omit_AA_dict=None, tied_positions_dict=None,
-                   pssm_dict=None, bias_by_res_dict=None, ca_only=False, side_chains=False):
+                   pssm_dict=None, bias_by_res_dict=None, ca_only=False, side_chains=False, indels=False):
     """ Pack and pad batch into torch tensors - modified to also handle mutation data"""
-    alphabet = 'ACDEFGHIKLMNPQRSTVWYX'
+    if indels:
+        alphabet = 'ACDEFGHIKLMNPQRSTVWYXZag' # Z = deletion, a = insA, g = insG
+    else:
+        alphabet = 'ACDEFGHIKLMNPQRSTVWYX'
     B = len(batch)
     try:
         lengths = np.array([len(b['seq']) for b in batch], dtype=np.int32)  # sum of chain seq lengths
@@ -259,8 +262,8 @@ def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict
         MUT_DDG[i, :] = mut.ddG
         # keep ALL mutation info (handles multiple mutations)
         positions = mut.position
-        wtAAs = [ALPHABET.index(aa) for aa in mut.wildtype]
-        mutAAs = [ALPHABET.index(aa) for aa in mut.mutation]
+        wtAAs = [alphabet.index(aa) for aa in mut.wildtype]
+        mutAAs = [alphabet.index(aa) for aa in mut.mutation]
         for nm in range(len(positions)):  # handle variable number of mutations (zero padded)
             MUT_POS[i, nm] = positions[nm]
             MUT_WT_AA[i, nm] = wtAAs[nm]
@@ -309,6 +312,7 @@ def tied_featurize_mut(batch, device='cpu', chain_dict=None, fixed_position_dict
     MUT_WT_AA = torch.from_numpy(MUT_WT_AA).to(dtype=torch.long, device=device)
     MUT_MUT_AA = torch.from_numpy(MUT_MUT_AA).to(dtype=torch.long, device=device)
     MUT_DDG = torch.from_numpy(MUT_DDG).to(dtype=torch.float32, device=device)
+    
     atom_mask = torch.from_numpy(np.prod(isnan, axis=-1)).to(dtype=torch.long, device=device)
     return X_out, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, MUT_POS, MUT_WT_AA, MUT_MUT_AA, MUT_DDG, atom_mask
 
@@ -571,7 +575,6 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
 
             self.df = pd.concat(mut_list, axis=0).reset_index(drop=True)
             self.df['DIRECT'] = True
-            self.df['wt_orig'] = self.df['mut_type'].str[0]
             self.wt_names = self.df.WT_name.unique()
 
             # load PDB data
@@ -595,14 +598,14 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
             df = pd.read_csv(fname, usecols=["ddG_ML", "mut_type", "WT_name", "aa_seq"])
             # remove unreliable data and insertion/deletion mutations
             df = df.loc[df.ddG_ML != '-', :].reset_index(drop=True)
-            df = df.loc[~df.mut_type.str.contains("ins") & ~df.mut_type.str.contains("del"), :].reset_index(drop=True)
+            # df = df.loc[~df.mut_type.str.contains("ins") & ~df.mut_type.str.contains("del"), :].reset_index(drop=True)
 
             mut_list = []
             if 'single' in self.cfg.data.mut_types:
-                mut_list.append(df.loc[~df.mut_type.str.contains(":") & ~df.mut_type.str.contains("wt"), :].reset_index(drop=True))
+                mut_list.append(df.loc[~df.mut_type.str.contains(":") & ~df.mut_type.str.contains("wt") & ~df.mut_type.str.contains("ins") & ~df.mut_type.str.contains("del"), :].reset_index(drop=True))
             
             if 'double' in self.cfg.data.mut_types:
-                tmp = df.loc[(df.mut_type.str.count(":") == 1) & (~df.mut_type.str.contains("wt")), :].reset_index(drop=True)
+                tmp = df.loc[(df.mut_type.str.count(":") == 1) & (~df.mut_type.str.contains("wt")) & ~df.mut_type.str.contains("ins") & ~df.mut_type.str.contains("del"), :].reset_index(drop=True)
                 
                 # Remove hidden single mutations
                 mut = tmp.mut_type.values
@@ -614,7 +617,13 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
                 tmp['dupe'] = tmp['WT_name'] + '_' + tmp['mut_type']
                 tmp = tmp.drop_duplicates(subset=['dupe']).reset_index(drop=True)
                 mut_list.append(tmp)
-                
+
+            # indel parsing
+            if 'insertion' in self.cfg.data.mut_types:
+                mut_list.append(df.loc[df.mut_type.str.contains("ins"), :].reset_index(drop=True))
+            if 'deletion' in self.cfg.data.mut_types:
+                mut_list.append(df.loc[df.mut_type.str.contains("del"), :].reset_index(drop=True))
+
             self.df = pd.concat(mut_list, axis=0).reset_index(drop=True)  # this includes points missing structure data
             
             # load splits produced by mmseqs clustering
@@ -634,13 +643,12 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
 
             # filter df for only data with structural data
             self.df = self.df.loc[self.df.WT_name.isin(self.wt_names)].reset_index(drop=True)
-            
+
             df_list = []
             # pick which mutations to use (data augmentation)
-            if ('single' in self.cfg.data.mut_types) or ('double' in self.cfg.data.mut_types):
-                print('Including %s direct single/double mutations' % str(self.df.shape[0]))
+            if ('single' in self.cfg.data.mut_types) or ('double' in self.cfg.data.mut_types) or ('insertion' in self.cfg.data.mut_types or 'deletion' in self.cfg.data.mut_types):
+                print('Including %s direct mutations' % str(self.df.shape[0]))
                 self.df['DIRECT'] = True
-                self.df['wt_orig'] = self.df['mut_type'].str[0]  # mark original WT for file loading use
                 df_list.append(self.df)
                 
             if 'double-aug' in cfg.data.mut_types:
@@ -714,6 +722,28 @@ class MegaScaleDatasetv2(torch.utils.data.Dataset):
                     pdb = parse_PDB(pdb_file, side_chains=self.side_chains)[0]
                     torch.save(pdb, pt_file)
 
+        elif 'ins' in mt:
+            pdb = self.pdb_data[row.WT_name.removesuffix('.pdb')]
+            mt = mt.removeprefix('ins')
+            pos_list = [int(mt[1:]) - 1]
+            mut_list = [mt[0].lower()]
+            tmp_pdb = deepcopy(pdb)
+            wt_list = tmp_pdb['seq'][pos_list[0]]
+            ddG = -1 * float(row.ddG_ML)
+            tmp_pdb['mutation'] = Mutation(pos_list, wt_list, mut_list, ddG, row.WT_name)
+            return tmp_pdb
+        
+        elif 'del' in mt:
+            pdb = self.pdb_data[row.WT_name.removesuffix('.pdb')]
+            mt = mt.removeprefix('del')
+            pos_list = [int(mt[1:]) - 1]
+            wt_list = [mt[0]]
+            mut_list = ['Z'] # single deletion
+            tmp_pdb = deepcopy(pdb)
+            ddG = -1 * float(row.ddG_ML)
+            tmp_pdb['mutation'] = Mutation(pos_list, wt_list, mut_list, ddG, row.WT_name)
+            return tmp_pdb
+        
         else:
             wt_list = [mt[0]]
             mut_list = [mt[-1]]

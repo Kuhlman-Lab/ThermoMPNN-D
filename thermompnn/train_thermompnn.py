@@ -28,6 +28,7 @@ def parse_cfg(cfg):
     cfg.data.refresh_every = cfg.data.get('refresh_every', 0)
     cfg.data.weight = cfg.data.get('weight', False)
     cfg.data.range = cfg.data.get('range', None)
+    cfg.data.avg = cfg.data.get('avg', False)
 
     # training config
     cfg.training = cfg.get('training', {})
@@ -77,13 +78,15 @@ def train(cfg):
 
     train_dataset, val_dataset = get_v2_dataset(cfg)
 
+    indels = ('insertion' in cfg.data.mut_types) or ('deletion' in cfg.data.mut_types)
+
     train_loader = DataLoader(train_dataset, 
-                                collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains), 
+                                collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains, indels=indels), 
                                 shuffle=cfg.training.shuffle, 
                                 num_workers=cfg.training.num_workers, 
                                 batch_size=cfg.training.batch_size)
     val_loader = DataLoader(val_dataset, 
-                                collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains), 
+                                collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.side_chains, indels=indels), 
                                 shuffle=False, 
                                 num_workers=cfg.training.num_workers, 
                                 batch_size=cfg.training.batch_size)

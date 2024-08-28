@@ -20,9 +20,11 @@ def inference(cfg, args):
     ds = load_v2_dataset(cfg)
     print('Loading model %s' % args.model)
     if cfg.model.aggregation == 'siamese':
-        model = TransferModelPLv2Siamese.load_from_checkpoint(args.model, cfg=cfg, map_location=device, train_dataset=ds, val_dataset=ds).model
+        model = TransferModelPLv2Siamese.load_from_checkpoint(args.model, cfg=cfg, map_location=device).model
     else:
-        model = TransferModelPLv2.load_from_checkpoint(args.model, cfg=cfg, map_location=device, train_dataset=ds, val_dataset=ds).model
+        cfg.data.mut_types = ['insertion', 'deletion']
+        # cfg.data.mut_types = ['single', 'insertion', 'deletion'] # TODO override to load proper model dims
+        model = TransferModelPLv2.load_from_checkpoint(args.model, cfg=cfg, map_location=device).model
     results = run_prediction_batched(model_name, model, ds_name, ds, [], args.keep_preds, cfg=cfg)
 
     df = pd.DataFrame(results)

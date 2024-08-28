@@ -12,7 +12,7 @@ class TransferModelPLv2(pl.LightningModule):
     def __init__(self, cfg):
         super().__init__()
         self.model = TransferModelv2(cfg)
-
+        print(self.model) # temp
         self.cfg = cfg
         self.dev = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
         
@@ -38,6 +38,7 @@ class TransferModelPLv2(pl.LightningModule):
             # modify seq and do reverse (mutant) pass
             backwd_preds, _ = self(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_mutant_AAs, mut_wildtype_AAs, mut_ddGs, atom_mask)
             preds = fwd_preds - backwd_preds
+
         else:
             X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask = batch
             preds, _ = self(X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask)

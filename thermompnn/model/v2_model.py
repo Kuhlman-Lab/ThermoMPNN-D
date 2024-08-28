@@ -73,8 +73,6 @@ class TransferModelv2(nn.Module):
         hid_sizes += list(self.cfg.model.hidden_dims)
         hid_sizes += [ VOCAB_DIM ]
 
-        print('MLP HIDDEN SIZES:', hid_sizes)
-
         if self.cfg.model.lightattn:
             if self.multi_mutations:
                 self.light_attention = nn.Sequential()
@@ -83,7 +81,8 @@ class TransferModelv2(nn.Module):
                 self.light_attention.append(nn.Linear(HIDDEN_DIM * self.cfg.model.num_final_layers + EMBED_DIM, HIDDEN_DIM, bias=True)) # E down to 128 regardless
                 hid_sizes[0] = HIDDEN_DIM
             else:
-                self.light_attention = LightAttention(embeddings_dim=(HIDDEN_DIM*self.cfg.model.num_final_layers + EMBED_DIM), kernel_size=1)
+                ED = HIDDEN_DIM*self.cfg.model.num_final_layers + EMBED_DIM
+                self.light_attention = LightAttention(embeddings_dim=(ED), kernel_size=1)
         
         if self.cfg.model.dist:
             self.dist_norm = nn.LayerNorm(25)  # do normalization of raw dist values
@@ -104,7 +103,7 @@ class TransferModelv2(nn.Module):
             self.ddg_out.append(nn.ReLU())
             self.ddg_out.append(nn.Linear(sz1, sz2))
 
-    def forward(self, X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask, esm_emb=None):
+    def forward(self, X, S, mask, chain_M, residue_idx, chain_encoding_all, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask):
         """Vectorized fwd function for arbitrary batches of mutations"""
 
         # getting ProteinMPNN embeddings (use only backbone atoms)
@@ -311,9 +310,16 @@ class TransferModelv2(nn.Module):
             else:
                 embeds_all = [mpnn_embed]
             mpnn_embed = torch.cat(embeds_all, -1)
-            
+
             # vectorized indexing of the embeddings (this is very ugly but the best I can do for now)
-            mpnn_embed = torch.gather(mpnn_embed, 1, mut_positions.unsqueeze(-1).expand(mut_positions.size(0), mut_positions.size(1), mpnn_embed.size(2)))
+            if self.cfg.data.avg: # get position BEFORE the insertion as well
+                mut_positions_m1 = torch.clip(mut_positions - 1, min=0) # need to clip to prevent negative index at first position
+                e1 = torch.gather(mpnn_embed, 1, mut_positions.unsqueeze(-1).expand(mut_positions.size(0), mut_positions.size(1), mpnn_embed.size(2)))
+                e2 = torch.gather(mpnn_embed, 1, mut_positions_m1.unsqueeze(-1).expand(mut_positions.size(0), mut_positions.size(1), mpnn_embed.size(2)))
+                mpnn_embed = (e1 + e2) / 2.
+            else:
+                mpnn_embed = torch.gather(mpnn_embed, 1, mut_positions.unsqueeze(-1).expand(mut_positions.size(0), mut_positions.size(1), mpnn_embed.size(2)))
+
             mpnn_embed = torch.squeeze(mpnn_embed, 1) # final shape: (batch, embed_dim)
 
             if self.cfg.model.lightattn:
@@ -321,15 +327,15 @@ class TransferModelv2(nn.Module):
                 mpnn_embed = self.light_attention(mpnn_embed)  # shape for LA output: (batch, embed_dim)
 
         ddg = self.ddg_out(mpnn_embed)  # shape: (batch, 21)
-        
-        # index ddg outputs based on mutant AA indices
-        if self.cfg.model.subtract_mut: # output is [B, L, 21]
-            ddg = torch.gather(ddg, 1, mut_mutant_AAs) - torch.gather(ddg, 1, mut_wildtype_AAs)
-        elif self.cfg.model.single_target: # output is [B, L, 1]
+        if self.cfg.model.single_target: # [B, L, 1]
             pass
-        else:  # output is [B, L, 21]
-           ddg = torch.gather(ddg, 1, mut_mutant_AAs)
-                       
+        else: # [B, L, 21]
+            if (('insertion' in self.cfg.data.mut_types) or ('deletion' in self.cfg.data.mut_types)) and ('single' not in self.cfg.data.mut_types):
+                mut_mutant_AAs -= 21
+            if self.cfg.model.subtract_mut:
+                ddg = torch.gather(ddg, 1, mut_mutant_AAs) - torch.gather(ddg, 1, mut_wildtype_AAs)
+            else:
+                ddg = torch.gather(ddg, 1, mut_mutant_AAs)
         return ddg, None
 
     def _set_model_dims(self):
@@ -352,6 +358,13 @@ class TransferModelv2(nn.Module):
     
         HIDDEN_DIM = 128 # mpnn default hidden dim size
         VOCAB_DIM = 21 if not self.cfg.model.single_target else 1
+
+        if 'insertion' in self.cfg.data.mut_types:
+            VOCAB_DIM += 2
+        if 'deletion' in self.cfg.data.mut_types:
+            VOCAB_DIM += 1
+        if 'single' not in self.cfg.data.mut_types:
+            VOCAB_DIM -= 21
 
         return HIDDEN_DIM, EMBED_DIM, VOCAB_DIM
 
