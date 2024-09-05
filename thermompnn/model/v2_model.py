@@ -312,11 +312,17 @@ class TransferModelv2(nn.Module):
             mpnn_embed = torch.cat(embeds_all, -1)
 
             # vectorized indexing of the embeddings (this is very ugly but the best I can do for now)
-            if self.cfg.data.avg: # get position BEFORE the insertion as well
+            if self.cfg.data.avg: # get features from position BEFORE the insertion as well
                 mut_positions_m1 = torch.clip(mut_positions - 1, min=0) # need to clip to prevent negative index at first position
+                # only get nextdoor features for insertions, skip it for others
+                ins_mask = mut_mutant_AAs > 21
                 e1 = torch.gather(mpnn_embed, 1, mut_positions.unsqueeze(-1).expand(mut_positions.size(0), mut_positions.size(1), mpnn_embed.size(2)))
                 e2 = torch.gather(mpnn_embed, 1, mut_positions_m1.unsqueeze(-1).expand(mut_positions.size(0), mut_positions.size(1), mpnn_embed.size(2)))
-                mpnn_embed = (e1 + e2) / 2.
+                e1[ins_mask] = (e1[ins_mask] + e2[ins_mask]) / 2.
+                mpnn_embed = e1
+                # e1 = torch.gather(mpnn_embed, 1, mut_positions.unsqueeze(-1).expand(mut_positions.size(0), mut_positions.size(1), mpnn_embed.size(2)))
+                # e2 = torch.gather(mpnn_embed, 1, mut_positions_m1.unsqueeze(-1).expand(mut_positions.size(0), mut_positions.size(1), mpnn_embed.size(2)))
+                # mpnn_embed = (e1 + e2) / 2.
             else:
                 mpnn_embed = torch.gather(mpnn_embed, 1, mut_positions.unsqueeze(-1).expand(mut_positions.size(0), mut_positions.size(1), mpnn_embed.size(2)))
 

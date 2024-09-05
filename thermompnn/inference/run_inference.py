@@ -22,8 +22,8 @@ def inference(cfg, args):
     if cfg.model.aggregation == 'siamese':
         model = TransferModelPLv2Siamese.load_from_checkpoint(args.model, cfg=cfg, map_location=device).model
     else:
-        cfg.data.mut_types = ['insertion', 'deletion']
-        # cfg.data.mut_types = ['single', 'insertion', 'deletion'] # TODO override to load proper model dims
+        # cfg.data.mut_types = ['insertion', 'deletion']
+        cfg.data.mut_types = ['single', 'insertion', 'deletion'] # TODO override to load proper model dims
         model = TransferModelPLv2.load_from_checkpoint(args.model, cfg=cfg, map_location=device).model
     results = run_prediction_batched(model_name, model, ds_name, ds, [], args.keep_preds, cfg=cfg)
 

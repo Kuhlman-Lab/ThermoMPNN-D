@@ -1,0 +1,27 @@
+# project: ThermoMPNN_v2
+# name: indel
+
+data:
+  dataset: megascale
+  mut_types: [single, insertion, deletion]
+  splits: [test]
+  avg: true
+
+training:
+  num_workers: 16
+  learn_rate: 0.00001
+  epochs: 100
+  lr_schedule: true
+  batch_size: 256
+  shuffle: false
+
+model:
+  hidden_dims: [128, 128]
+  subtract_mut: false
+  mutant_embedding: false
+  single_target: false
+  num_final_layers: 2
+  freeze_weights: true
+  load_pretrained: true
+  lightattn: true
+  proteinmpnn_dropout: 0.0

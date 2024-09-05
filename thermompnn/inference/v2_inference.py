@@ -30,7 +30,7 @@ def run_prediction_batched(name, model, dataset_name, dataset, results, keep=Tru
     preds, ddgs = [], []
     INDELS = True # TODO repair
 
-    loader = DataLoader(dataset, collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.get('side_chains', False), indels=INDELS, torsions=cfg.data.torsions), 
+    loader = DataLoader(dataset, collate_fn=lambda b: tied_featurize_mut(b, side_chains=cfg.data.get('side_chains', False), indels=INDELS), 
                         shuffle=False, num_workers=cfg.training.get('num_workers', 8), batch_size=cfg.training.get('batch_size', 256))
 
     batches = []
