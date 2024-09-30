@@ -51,7 +51,7 @@ This sums the individual contributions from each single mutation without attempt
 #### Epistatic double mutant model
 This model attempts to capture epistatic interactions between double mutations, which requires running inference on every individual mutation. This is slower than the single or additive model but is still reasonably fast (<1 minute) due to some vectorizing and batching tricks.
 
-```python v2_ssm.py --mode additive --pdb examples/pdbs/1VII.pdb --batch_size 2048 --out 1VII```
+```python v2_ssm.py --mode epistatic --pdb examples/pdbs/1VII.pdb --batch_size 2048 --out 1VII```
 
 Note the higher batch size, which takes advantage of the lightweight prediction head to significantly speed up inference.
 
