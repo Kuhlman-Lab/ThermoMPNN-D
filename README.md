@@ -4,6 +4,7 @@
 
 This work is an extension of ThermoMPNN (https://github.com/Kuhlman-Lab/ThermoMPNN), which is itself an extension of ProteinMPNN (https://github.com/dauparas/ProteinMPNN). For details, see our manuscript [here](https://www.biorxiv.org/content/10.1101/2024.08.20.608844v1).
 
+To try out ThermoMPNN-D right in your browser, use the Colab notebook at [this link](https://colab.research.google.com/github/Kuhlman-Lab/ThermoMPNN-D/blob/main/ThermoMPNN-D.ipynb).
 
 ### Installation
 
