@@ -2,20 +2,209 @@ import argparse
 import os
 import torch
 import numpy as np
+import re
 import pandas as pd
 from omegaconf import OmegaConf
 from tqdm import tqdm
 import time
 from torch.utils.data import DataLoader
 from scipy.spatial.distance import cdist
+from Bio.PDB import PDBParser
 
 from thermompnn.trainer.v2_trainer import TransferModelPLv2, TransferModelPLv2Siamese
 from thermompnn.train_thermompnn import parse_cfg
 
-from thermompnn.protein_mpnn_utils import alt_parse_PDB
 from thermompnn.datasets.v2_datasets import tied_featurize_mut
 from thermompnn.datasets.dataset_utils import Mutation
 from thermompnn.model.v2_model import batched_index_select, _dist
+
+
+def idx_to_pdb_num(pdb, poslist):
+  # set up PDB resns and boundaries
+  chains = [key[-1] for key in pdb.keys() if key.startswith('resn_list_')]
+  resn_lists = [pdb[key] for key in pdb.keys() if key.startswith('resn_list')]
+  converter = {}
+  offset = 0
+  for n, rlist in enumerate(resn_lists):
+      chain = chains[n]
+      for idx, resid in enumerate(rlist):
+          converter[idx + offset] = chain + resid
+      offset += idx + 1
+
+  return [converter[pos] for pos in poslist]
+
+
+def custom_parse_PDB_biounits(x, atoms=['N', 'CA', 'C'], chain=None):
+    '''
+  input:  x = PDB filename
+          atoms = atoms to extract (optional)
+  output: (length, atoms, coords=(x,y,z)), sequence
+  '''
+
+    alpha_1 = list("ARNDCQEGHILKMFPSTWYV-")
+    states = len(alpha_1)
+    alpha_3 = ['ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY', 'HIS', 'ILE',
+               'LEU', 'LYS', 'MET', 'PHE', 'PRO', 'SER', 'THR', 'TRP', 'TYR', 'VAL', 'GAP']
+
+    aa_1_N = {a: n for n, a in enumerate(alpha_1)}
+    aa_3_N = {a: n for n, a in enumerate(alpha_3)}
+    aa_N_1 = {n: a for n, a in enumerate(alpha_1)}
+    aa_1_3 = {a: b for a, b in zip(alpha_1, alpha_3)}
+    aa_3_1 = {b: a for a, b in zip(alpha_1, alpha_3)}
+
+    def AA_to_N(x):
+        # ["ARND"] -> [[0,1,2,3]]
+        x = np.array(x);
+        if x.ndim == 0: x = x[None]
+        return [[aa_1_N.get(a, states - 1) for a in y] for y in x]
+
+    def N_to_AA(x):
+        # [[0,1,2,3]] -> ["ARND"]
+        x = np.array(x);
+        if x.ndim == 1: x = x[None]
+        return ["".join([aa_N_1.get(a, "-") for a in y]) for y in x]
+
+    xyz, seq, min_resn, max_resn = {}, {}, 1e6, -1e6
+    resn_list = []
+    for line in open(x, "rb"):
+        line = line.decode("utf-8", "ignore").rstrip()
+
+        # handling MSE and SEC residues
+        if line[:6] == "HETATM" and line[17:17 + 3] == "MSE":
+            line = line.replace("HETATM", "ATOM  ")
+            line = line.replace("MSE", "MET")
+        elif line[17:17 + 3] == "MSE":
+            line = line.replace("MSE", "MET")
+        elif line[17:17 + 3] == "SEC":
+            line = line.replace("SEC", "CYS")
+
+        if line[:4] == "ATOM":
+            ch = line[21:22]
+            if ch == chain or chain is None:
+                atom = line[12:12 + 4].strip()
+                resi = line[17:17 + 3]
+                resn = line[22:22 + 5].strip()
+
+                # TODO check for gaps and add them if needed
+                if (resn not in resn_list) and len(resn_list) > 0:
+                  _, num, ins_code = re.split(r'(\d+)', resn)
+                  _, num_prior, ins_code_prior = re.split(r'(\d+)', resn_list[-1])
+                  gap = int(num) - int(num_prior) - 1
+                  for g in range(gap + 1):
+                    resn_list.append(str(int(num_prior) + g))
+
+                # RAW resn is defined HERE
+                resn_list.append(resn) # NEED to keep ins code here
+
+                x, y, z = [float(line[i:(i + 8)]) for i in [30, 38, 46]]
+                if resn[-1].isalpha():
+                    resa, resn = resn[-1], int(resn[:-1]) - 1
+                else:
+                    resa, resn = "", int(resn) - 1
+                if resn < min_resn:
+                    min_resn = resn
+                if resn > max_resn:
+                    max_resn = resn
+                if resn not in xyz:
+                    xyz[resn] = {}
+                if resa not in xyz[resn]:
+                    xyz[resn][resa] = {}
+                if resn not in seq:
+                    seq[resn] = {}
+                if resa not in seq[resn]:
+                    seq[resn][resa] = resi
+
+                if atom not in xyz[resn][resa]:
+                    xyz[resn][resa][atom] = np.array([x, y, z])
+
+    # convert to numpy arrays, fill in missing values
+    seq_, xyz_ = [], []
+    try:
+        for resn in range(min_resn, max_resn + 1):
+            if resn in seq:
+                for k in sorted(seq[resn]): seq_.append(aa_3_N.get(seq[resn][k], 20))
+            else:
+                seq_.append(20)
+
+            if resn in xyz:
+                for k in sorted(xyz[resn]):
+                    for atom in atoms:
+                        if atom in xyz[resn][k]:
+                            xyz_.append(xyz[resn][k][atom])
+                        else:
+                            xyz_.append(np.full(3, np.nan))
+            else:
+                for atom in atoms: xyz_.append(np.full(3, np.nan))
+        return np.array(xyz_).reshape(-1, len(atoms), 3), N_to_AA(np.array(seq_)), list(dict.fromkeys(resn_list))
+    except TypeError:
+        return 'no_chain', 'no_chain', 'no_chain'
+
+
+def custom_parse_PDB(path_to_pdb, input_chain_list=None, ca_only=False, side_chains=False, mut_chain=None):
+    c = 0
+    pdb_dict_list = []
+    init_alphabet = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T',
+                     'U', 'V', 'W', 'X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n',
+                     'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z']
+    extra_alphabet = [str(item) for item in list(np.arange(300))]
+    chain_alphabet = init_alphabet + extra_alphabet
+
+    if input_chain_list:
+        chain_alphabet = input_chain_list
+
+    biounit_names = [path_to_pdb]
+    for biounit in biounit_names:
+        my_dict = {}
+        s = 0
+        concat_seq = ''
+        concat_N = []
+        concat_CA = []
+        concat_C = []
+        concat_O = []
+        concat_mask = []
+        coords_dict = {}
+        for letter in chain_alphabet:
+            if ca_only:
+                sidechain_atoms = ['CA']
+            elif side_chains:
+                sidechain_atoms = ["N", "CA", "C", "O", "CB",
+                                   "CG", "CG1", "OG1", "OG2", "CG2", "OG", "SG",
+                                   "CD", "SD", "CD1", "ND1", "CD2", "OD1", "OD2", "ND2",
+                                   "CE", "CE1", "NE1", "OE1", "NE2", "OE2", "NE", "CE2", "CE3",
+                                   "NZ", "CZ", "CZ2", "CZ3", "CH2", "OH", "NH1", "NH2"]
+            else:
+                sidechain_atoms = ['N', 'CA', 'C', 'O']
+            xyz, seq, resn_list = custom_parse_PDB_biounits(biounit, atoms=sidechain_atoms, chain=letter)
+            if resn_list != 'no_chain':
+              my_dict['resn_list_' + letter] = resn_list
+                  # my_dict['resn_list'] = list(resn_list)
+            if type(xyz) != str:
+                concat_seq += seq[0]
+                my_dict['seq_chain_' + letter] = seq[0]
+                coords_dict_chain = {}
+                if ca_only:
+                    coords_dict_chain['CA_chain_' + letter] = xyz.tolist()
+                elif side_chains:
+                    coords_dict_chain['SG_chain_' + letter] = xyz[:, 11].tolist()
+                else:
+                    coords_dict_chain['N_chain_' + letter] = xyz[:, 0, :].tolist()
+                    coords_dict_chain['CA_chain_' + letter] = xyz[:, 1, :].tolist()
+                    coords_dict_chain['C_chain_' + letter] = xyz[:, 2, :].tolist()
+                    coords_dict_chain['O_chain_' + letter] = xyz[:, 3, :].tolist()
+                my_dict['coords_chain_' + letter] = coords_dict_chain
+                s += 1
+
+        fi = biounit.rfind("/")
+        # if mut_chain is None:
+          # my_dict['resn_list'] = list(resn_list)
+        my_dict['name'] = biounit[(fi + 1):-4]
+        my_dict['num_of_chains'] = s
+        my_dict['seq'] = concat_seq
+        # my_dict['resn_list'] = list(resn_list)
+        if s <= len(chain_alphabet):
+            pdb_dict_list.append(my_dict)
+            c += 1
+    return pdb_dict_list
 
 
 def get_config(mode):
@@ -38,6 +227,23 @@ def get_config(mode):
     )
 
     return parse_cfg(config)
+
+
+def get_chains(pdb_file, chain_list):
+  # collect list of chains in PDB to match with input
+  parser = PDBParser(QUIET=True)
+  structure = parser.get_structure('', pdb_file)
+  pdb_chains = [c.id for c in structure.get_chains()]
+
+  if chain_list is None: # fill in all chains if left blank
+    chain_list = pdb_chains
+  elif len(chain_list) < 1:
+    chain_list = pdb_chains
+
+  for ch in chain_list:
+    assert ch in pdb_chains, f"Chain {ch} not found in PDB file with chains {pdb_chains}"
+
+  return chain_list
 
 
 def get_ssm_mutations_double(pdb):
@@ -212,12 +418,9 @@ def run_single_ssm(args, cfg, model):
     stime = time.time()
 
     # parse PDB
-    if args.chain is not None:
-        chains = [args.chain]
-    else:
-        chains = None
+    chains = get_chains(args.pdb, args.chains)
 
-    pdb = alt_parse_PDB(args.pdb, input_chain_list=chains)
+    pdb = custom_parse_PDB(args.pdb, input_chain_list=chains)
     pdb[0]['mutation'] = Mutation([0], ['A'], ['A'], [0.], '') # placeholder mutation to keep featurization from throwing error
 
     # featurize input
@@ -358,12 +561,9 @@ def run_epistatic_ssm(args, cfg, model):
     stime = time.time()
 
     # parse PDB
-    if args.chain is not None:
-        chains = [args.chain]
-    else:
-        chains = None
+    chains = get_chains(args.pdb, args.chains)
 
-    pdb = alt_parse_PDB(args.pdb, input_chain_list=chains)
+    pdb = custom_parse_PDB(args.pdb, input_chain_list=chains)
     pdb[0]['mutation'] = Mutation([0], ['A'], ['A'], [0.], '') # placeholder mutation to keep featurization from throwing error
 
     # featurize input
@@ -401,12 +601,9 @@ def run_epistatic_ssm(args, cfg, model):
 def distance_filter(df, args):
     """filter df based on pdb distances"""
     # parse PDB
-    if args.chain is not None:
-        chains = [args.chain]
-    else:
-        chains = None
+    chains = get_chains(args.pdb, args.chains)
 
-    pdb = alt_parse_PDB(args.pdb, input_chain_list=chains)[0]
+    pdb = custom_parse_PDB(args.pdb, input_chain_list=chains)[0]
 
     # grab positions
     df[['mut1', 'mut2']] = df['Mutation'].str.split(':', n=2, expand=True)
@@ -415,13 +612,14 @@ def distance_filter(df, args):
 
     # get distance matrix
     coords = [k for k in pdb.keys() if k.startswith('coords_chain_')]
-    assert len(coords) < 2
-
+    # compile all-by-all coords into big matrix
+    coo_all = []
     for coord in coords:
-        ch = coord.split('_')[-1]
-        coo = pdb[coord][f'N_chain_{ch}']
-        coo = np.stack(coo) # [L, 3]
-        dmat = cdist(coo, coo) # [L, L]
+      ch = coord.split('_')[-1]
+      coo = np.stack(pdb[coord][f'CA_chain_{ch}']) # [L, 3]
+      coo_all.append(coo)
+    coo_all = np.concatenate(coo_all) # [L_total, 3]
+    dmat = cdist(coo_all, coo_all)
 
     # filter df based on positions
     pos1, pos2 = df['pos1'].values, df['pos2'].values
@@ -441,8 +639,8 @@ def distance_filter(df, args):
 def renumber_pdb(df, args):
     """Renumber output mutations to match PDB numbering for interpretation"""
     # parse PDB
-    chains = [args.chain] if args.chain is not None else None
-    pdb = alt_parse_PDB(args.pdb, input_chain_list=chains)[0]
+    chains = get_chains(args.pdb, args.chains)
+    pdb = custom_parse_PDB(args.pdb, input_chain_list=chains)[0]
 
     if (args.mode == 'additive') or (args.mode == 'epistatic'):
         # grab positions
@@ -450,16 +648,9 @@ def renumber_pdb(df, args):
         df['pos1'] = df['mut1'].str[1:-1].astype(int) - 1
         df['pos2'] = df['mut2'].str[1:-1].astype(int) - 1
 
-        pos1, pos2 = df['pos1'].values, df['pos2'].values
-        resn1_list, resn2_list = [], []
-        for p1, p2 in tqdm(zip(pos1, pos2)):
-            resn1 = pdb['resn_list'][p1]
-            resn2 = pdb['resn_list'][p2]
-            resn1_list.append(resn1)
-            resn2_list.append(resn2)
+        df['pos1'] = idx_to_pdb_num(pdb, df['pos1'].values)
+        df['pos2'] = idx_to_pdb_num(pdb, df['pos2'].values)
 
-        df['pos1'] = resn1_list
-        df['pos2'] = resn2_list
         df['wt1'], df['wt2'] = df['mut1'].str[0], df['mut2'].str[0]
         df['mt1'], df['mt2'] = df['mut1'].str[-1], df['mut2'].str[-1]
 
@@ -470,21 +661,77 @@ def renumber_pdb(df, args):
         # grab position
         df['pos'] = df['Mutation'].str[1:-1].astype(int) - 1
 
-        pos1 = df['pos'].values
-        resn1_list = []
-        for p1 in tqdm(pos1):
-            resn1 = pdb['resn_list'][p1]
-            resn1_list.append(resn1)
+        df['pos'] = idx_to_pdb_num(pdb, df['pos'].values)
+        df['wt'] = df['Mutation'].str[0]
+        df['mt'] = df['Mutation'].str[-1]
 
-        df['pos1'] = resn1_list
-        df['wt1'] = df['Mutation'].str[0]
-        df['mt1'] = df['Mutation'].str[-1]
-
-        df['Mutation'] = df['wt1'] + df['pos1'] + df['mt1']   
+        df['Mutation'] = df['wt'] + df['pos'] + df['mt']   
         df = df[['ddG (kcal/mol)', 'Mutation']].reset_index(drop=True)
 
     print(f'ThermoMPNN predictions renumbered.')
     return df 
+
+
+def disulfide_penalty(df, pdb_file, chain_list, model):
+  """Automatically detects disulfide breakage based on Cys-Cys distance."""
+
+  chain_list = get_chains(pdb_file, chain_list)
+  pdb_dict = custom_parse_PDB(pdb_file, input_chain_list=chain_list, side_chains=True)
+
+  # collect all SG coordinates from all chains
+  coords_all = [k for k in pdb_dict[0].keys() if k.startswith('coords')]
+  chains = [c[-1] for c in coords_all]
+  sg_coords = [pdb_dict[0][c][f'SG_chain_{chain}'] for c, chain in zip(coords_all, chains)]
+  sg_coords = np.concatenate(sg_coords, axis=0)
+
+  # calculate pairwise distance and threshold to find disulfides
+  dist = cdist(sg_coords, sg_coords)
+  dist = np.nan_to_num(dist, 10000)
+  hits = np.where((dist < 3) & (dist > 0)) # tuple of two [N] arrays of indices
+
+  if model == 'single':
+    df['wtAA'] = df['Mutation'].str[0]
+    df['mutAA'] = df['Mutation'].str[-1]
+    df['pos'] = df['Mutation'].str[1:-1].astype(int) - 1
+
+    # match hit indices to actual resns for penalty
+    bad_resns = []
+    for h in hits[0]:
+      bad_resns.append(h)
+
+    print('Identified the following disulfide engaged residues:', bad_resns)
+
+    # apply penalty
+    penalty = 2  # in kcal/mol - higher is less stable
+    mask = df['pos'].isin(bad_resns) & (df['wtAA'] != df['mutAA'])
+
+    df.loc[mask, 'ddG (kcal/mol)'] = df.loc[mask, 'ddG (kcal/mol)'] + penalty
+    return df[['Mutation', 'ddG (kcal/mol)']].reset_index(drop=True)
+
+  else:
+    df[['mut1', 'mut2']] = df['Mutation'].str.split(':', n=2, expand=True)
+    df['wtAA1'] = df['mut1'].str[0]
+    df['mutAA1'] = df['mut1'].str[-1]
+    df['pos1'] = df['mut1'].str[1:-1].astype(int) - 1
+
+    df['wtAA2'] = df['mut2'].str[0]
+    df['mutAA2'] = df['mut2'].str[-1]
+    df['pos2'] = df['mut2'].str[1:-1].astype(int) - 1
+
+    bad_resns = []
+    for h in hits[0]:
+      bad_resns.append(h)
+
+    print('Identified the following disulfide engaged residues:', bad_resns)
+
+    # apply penalty
+    penalty = 2  # in kcal/mol - higher is less stable
+    mask = df['pos1'].isin(bad_resns) & (df['wtAA1'] != df['mutAA1'])
+    mask2 = df['pos2'].isin(bad_resns) & (df['wtAA2'] != df['mutAA2'])
+    mask = mask | mask2
+
+    df.loc[mask, 'ddG (kcal/mol)'] = df.loc[mask, 'ddG (kcal/mol)'] + penalty
+    return df[['Mutation', 'ddG (kcal/mol)', 'CA-CA Distance']].reset_index(drop=True)
 
 
 def main(args):
@@ -519,6 +766,9 @@ def main(args):
 
     if args.mode != 'single':
         df = distance_filter(df, args)
+    
+    if args.ss_penalty:
+        df = disulfide_penalty(df, args.pdb, args.chains, model=args.mode)
 
     df = df.dropna(subset=['ddG (kcal/mol)'])
     if args.threshold <= -0.:
@@ -532,8 +782,11 @@ def main(args):
         df = df.sort_values(by=['pos1', 'pos2'])
         df = df[['ddG (kcal/mol)', 'Mutation', 'CA-CA Distance']].reset_index(drop=True)
 
-    df = renumber_pdb(df, args)
-
+    try:
+      df = renumber_pdb(df, args)
+    except (KeyError, IndexError):
+      print('PDB renumbering failed (sorry!) You can still use the raw position data. Or, you can renumber your PDB, fill any weird gaps, and try again.')
+    
     df.to_csv(args.out + '.csv')
 
     return
@@ -546,7 +799,8 @@ if __name__ == "__main__":
     parser.add_argument('--pdb', type=str, help='PDB file to run', default='./2OCJ.pdb')
     parser.add_argument('--batch_size', type=int, help='batch size for stability prediction module', default=256)
     parser.add_argument('--out', type=str, help='output mutation prefix to save csv', default='ssm')
-    parser.add_argument('--chain', type=str, help='chain to use (default is None, will use first chain)', default=None)
+    parser.add_argument('--chains', nargs='+', help='chain(s) to use. Default is None, which will use all chains. Example: A B C')
     parser.add_argument('--threshold', type=float, default=-0.5, help='Threshold for SSM sweep. By default, ThermoMPNN only saves mutations below this threshold (-0.5 kcal/mol). To save all mutations, set this really high (e.g., 100)')
     parser.add_argument('--distance', type=float, default=10.0, help='Filter for double mutant predictions using pairwise Ca distance cutoff (default is 5 A).')
+    parser.add_argument('--ss_penalty', action='store_true', help='Add explicit disulfide breakage penalty. Default is False.')
     main(parser.parse_args())
