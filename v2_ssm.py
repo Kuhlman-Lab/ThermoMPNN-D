@@ -465,7 +465,15 @@ def run_epistatic_ssm(pdb, cfg, model, distance, threshold, batch_size):
     return ddg, mutations
 
 
+def check_df_size(size):
+    if size == 0:
+        raise ValueError("No valid mutations passed your distance and ddG filters. Please increase one or both of these parameters and try again.")
+
+
 def main(args):
+    print('=' * 100)
+    print(args)
+    print('=' * 100)
     cfg = get_config(args.mode)
     model = get_model(args.mode, cfg)
     pdb_data = load_pdb(args.pdb, args.chains)
@@ -492,6 +500,8 @@ def main(args):
 
     df = pd.DataFrame({"ddG (kcal/mol)": ddg, "Mutation": mutations})
 
+    check_df_size(df.shape[0])
+
     if args.mode != "single":
         df = distance_filter(df, pdb_data, args.distance)
 
@@ -509,6 +519,8 @@ def main(args):
 
         df = df.sort_values(by=["pos1", "pos2"])
         df = df[["ddG (kcal/mol)", "Mutation", "CA-CA Distance"]].reset_index(drop=True)
+
+    check_df_size(df.shape[0])
 
     try:
         df = renumber_pdb(df, pdb_data, args.mode)
