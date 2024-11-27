@@ -64,7 +64,6 @@ def get_config(mode):
     return parse_cfg(config)
 
 
-
 def get_dmat(pdb):
     """Get LxL dmat from PDB"""
 
@@ -231,6 +230,10 @@ def custom_parse_PDB(path_to_pdb, input_chain_list=None, ca_only=False, side_cha
                 if ca_only:
                     coords_dict_chain['CA_chain_' + letter] = xyz.tolist()
                 elif side_chains:
+                    coords_dict_chain['N_chain_' + letter] = xyz[:, 0, :].tolist()
+                    coords_dict_chain['CA_chain_' + letter] = xyz[:, 1, :].tolist()
+                    coords_dict_chain['C_chain_' + letter] = xyz[:, 2, :].tolist()
+                    coords_dict_chain['O_chain_' + letter] = xyz[:, 3, :].tolist()
                     coords_dict_chain['SG_chain_' + letter] = xyz[:, 11].tolist()
                 else:
                     coords_dict_chain['N_chain_' + letter] = xyz[:, 0, :].tolist()
@@ -265,28 +268,14 @@ def idx_to_pdb_num(pdb, poslist):
   return [converter[pos] for pos in poslist]
 
 
-def distance_filter(df, args):
+def distance_filter(df, pdb, distance = 5.0):
     """filter df based on pdb distances"""
-    # parse PDB
-    chains = get_chains(args.pdb, args.chains)
-
-    pdb = custom_parse_PDB(args.pdb, input_chain_list=chains)[0]
+    dmat = get_dmat(pdb)
 
     # grab positions
     df[['mut1', 'mut2']] = df['Mutation'].str.split(':', n=2, expand=True)
     df['pos1'] = df['mut1'].str[1:-1].astype(int) - 1
     df['pos2'] = df['mut2'].str[1:-1].astype(int) - 1
-
-    # get distance matrix
-    coords = [k for k in pdb.keys() if k.startswith('coords_chain_')]
-    # compile all-by-all coords into big matrix
-    coo_all = []
-    for coord in coords:
-      ch = coord.split('_')[-1]
-      coo = np.stack(pdb[coord][f'CA_chain_{ch}']) # [L, 3]
-      coo_all.append(coo)
-    coo_all = np.concatenate(coo_all) # [L_total, 3]
-    dmat = cdist(coo_all, coo_all)
 
     # filter df based on positions
     pos1, pos2 = df['pos1'].values, df['pos2'].values
@@ -295,15 +284,97 @@ def distance_filter(df, args):
         dist_list.append(dmat[p1, p2])
 
     df['CA-CA Distance'] = dist_list
-    df = df.loc[df['CA-CA Distance'] <= args.distance]
-    df['CA-CA Distance'] = df['CA-CA Distance'].round(2)
+    mask = (df['CA-CA Distance'] <= distance) & (df['CA-CA Distance'] != 0.0)
+    df = df.loc[mask]
+    df.loc[:, 'CA-CA Distance'] = df['CA-CA Distance'].round(2)
 
     df = df[['ddG (kcal/mol)', 'Mutation', 'CA-CA Distance']].reset_index(drop=True)
     print('Distance matrix generated.')
     return df
 
 
+def renumber_pdb(df, pdb, mode):
+    """Renumber output mutations to match PDB numbering for interpretation"""
+
+    if (mode.lower() == 'additive') or (mode.lower() == 'epistatic'):
+        # grab positions
+        df[['mut1', 'mut2']] = df['Mutation'].str.split(':', n=2, expand=True)
+        df['pos1'] = df['mut1'].str[1:-1].astype(int) - 1
+        df['pos2'] = df['mut2'].str[1:-1].astype(int) - 1
+
+        df['pos1'] = idx_to_pdb_num(pdb, df['pos1'].values)
+        df['pos2'] = idx_to_pdb_num(pdb, df['pos2'].values)
+
+        df['wt1'], df['wt2'] = df['mut1'].str[0], df['mut2'].str[0]
+        df['mt1'], df['mt2'] = df['mut1'].str[-1], df['mut2'].str[-1]
+
+        df['Mutation'] = df['wt1'] + df['pos1'] + df['mt1'] + ':' + df['wt2'] + df['pos2'] + df['mt2']
+        df = df[['ddG (kcal/mol)', 'Mutation', 'CA-CA Distance']].reset_index(drop=True)
+
+    else:
+        # grab position
+        df['pos'] = df['Mutation'].str[1:-1].astype(int) - 1
+
+        df['pos'] = idx_to_pdb_num(pdb, df['pos'].values)
+        df['wt'] = df['Mutation'].str[0]
+        df['mt'] = df['Mutation'].str[-1]
+
+        df['Mutation'] = df['wt'] + df['pos'] + df['mt']   
+        df = df[['ddG (kcal/mol)', 'Mutation']].reset_index(drop=True)
+
+    print('ThermoMPNN predictions renumbered.')
+    return df 
+
+
+def disulfide_penalty(df, pdb, mode):
+  """Automatically detects disulfide breakage based on Cys-Cys distance."""
+
+  # collect all SG coordinates from all chains
+  coords_all = [k for k in pdb.keys() if k.startswith('coords')]
+  chains = [c[-1] for c in coords_all]
+  sg_coords = [pdb[c][f'SG_chain_{chain}'] for c, chain in zip(coords_all, chains)]
+  sg_coords = np.concatenate(sg_coords, axis=0)
+
+  # calculate pairwise distance and threshold to find disulfides
+  dist = cdist(sg_coords, sg_coords)
+  dist = np.nan_to_num(dist, 10000)
+  hits = np.where((dist < 3) & (dist > 0)) # tuple of two [N] arrays of indices
+
+  # match hit indices to actual resns for penalty
+  bad_resns = []
+  for h in hits[0]:
+    bad_resns.append(h)
+  penalty = 2  # in kcal/mol - higher is less stable
+  print('Identified the following disulfide engaged residues:', bad_resns)
+
+  if mode.lower() == 'single':
+    df['wtAA'] = df['Mutation'].str[0]
+    df['mutAA'] = df['Mutation'].str[-1]
+    df['pos'] = df['Mutation'].str[1:-1].astype(int) - 1
+
+    mask = df['pos'].isin(bad_resns) & (df['wtAA'] != df['mutAA'])
+    df.loc[mask, 'ddG (kcal/mol)'] = df.loc[mask, 'ddG (kcal/mol)'] + penalty
+    return df[['Mutation', 'ddG (kcal/mol)']].reset_index(drop=True)
+
+  else:
+    df[['mut1', 'mut2']] = df['Mutation'].str.split(':', n=2, expand=True)
+    df['wtAA1'] = df['mut1'].str[0]
+    df['mutAA1'] = df['mut1'].str[-1]
+    df['pos1'] = df['mut1'].str[1:-1].astype(int) - 1
+
+    df['wtAA2'] = df['mut2'].str[0]
+    df['mutAA2'] = df['mut2'].str[-1]
+    df['pos2'] = df['mut2'].str[1:-1].astype(int) - 1
+
+    mask = df['pos1'].isin(bad_resns) & (df['wtAA1'] != df['mutAA1'])
+    mask2 = df['pos2'].isin(bad_resns) & (df['wtAA2'] != df['mutAA2'])
+    mask = mask | mask2
+
+    df.loc[mask, 'ddG (kcal/mol)'] = df.loc[mask, 'ddG (kcal/mol)'] + penalty
+    return df[['Mutation', 'ddG (kcal/mol)', 'CA-CA Distance']].reset_index(drop=True)
+
+
 def load_pdb(fname, chainlist):
     chains = get_chains(fname, chainlist)
-    pdb = custom_parse_PDB(fname, input_chain_list=chains)[0]
+    pdb = custom_parse_PDB(fname, input_chain_list=chains, side_chains=True)[0]
     return pdb

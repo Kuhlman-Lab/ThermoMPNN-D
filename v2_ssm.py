@@ -14,7 +14,7 @@ from scipy.spatial.distance import cdist
 from thermompnn.datasets.v2_datasets import tied_featurize_mut
 from thermompnn.datasets.dataset_utils import Mutation
 from thermompnn.model.v2_model import batched_index_select, _dist
-from thermompnn.ssm_utils import get_chains, get_config, custom_parse_PDB, idx_to_pdb_num, get_model, load_pdb
+from thermompnn.ssm_utils import get_config, get_model, load_pdb, distance_filter, disulfide_penalty, renumber_pdb, get_dmat
 
 
 def get_ssm_mutations_double(pdb, dthresh):
@@ -70,16 +70,16 @@ def get_ssm_mutations_double(pdb, dthresh):
     return torch.tensor(pos_combos), torch.tensor(wtAA), torch.tensor(mutAA)
 
 
-def run_double(all_mpnn_hid, mpnn_embed, cfg, loader, args, model, X, mask, mpnn_edges_raw):
+def run_double(all_mpnn_hid, mpnn_embed, cfg, loader, batch_size, model, X, mask, mpnn_edges_raw):
     """Batched mutation processing using shared protein embeddings and only stability prediction module head"""
     device = 'cuda'
     all_mpnn_hid = torch.cat(all_mpnn_hid[:cfg.model.num_final_layers], -1)
-    all_mpnn_hid = all_mpnn_hid.repeat(args.batch_size, 1, 1)
-    mpnn_embed = mpnn_embed.repeat(args.batch_size, 1, 1)
-    mpnn_edges_raw = mpnn_edges_raw.repeat(args.batch_size, 1, 1, 1)
+    all_mpnn_hid = all_mpnn_hid.repeat(batch_size, 1, 1)
+    mpnn_embed = mpnn_embed.repeat(batch_size, 1, 1)
+    mpnn_edges_raw = mpnn_edges_raw.repeat(batch_size, 1, 1, 1)
     # get edges between the two mutated residues
     D_n, E_idx = _dist(X[:, :, 1, :], mask)
-    E_idx = E_idx.repeat(args.batch_size, 1, 1)
+    E_idx = E_idx.repeat(batch_size, 1, 1)
 
     preds = []
     for b in tqdm(loader):
@@ -264,7 +264,7 @@ def format_output_single(ddg, S, threshold=-0.5):
     return ddg, mutlist
 
 
-def format_output_double(ddg, S, threshold=-0.5):
+def format_output_double(ddg, S, threshold, pdb, distance):
     """Converts raw SSM predictions into nice format for analysis"""
     stime = time.time()
     ALPHABET = 'ACDEFGHIKLMNPQRSTVWYX'
@@ -274,8 +274,13 @@ def format_output_double(ddg, S, threshold=-0.5):
     ddg = expand_additive(ddg) # [L, 21, L, 21]
     ddg = ddg[:, :20, :, :20] # drop X predictions
 
-    p1s, a1s, p2s, a2s = np.where(ddg <= threshold) # filter by threshold
-    cond = (p1s < p2s) # & (a1s < a2s) # filter to keep only upper triangle
+    # Pre-mask matrix with distance constraints for speedup
+    dmat = get_dmat(pdb)
+    assert ddg.shape[0] == dmat.shape[0]
+    valid_mask = (ddg <= threshold) * (dmat < distance)[:, None, :, None] * (dmat != 0.0)[:, None, :, None]
+    p1s, a1s, p2s, a2s = np.where(valid_mask)
+
+    cond = (p1s < p2s) # filter to keep only upper triangle
     p1s, a1s, p2s, a2s = p1s[cond], a1s[cond], p2s[cond], a2s[cond]
     wt_seq = [ALPHABET[S[ppp]] for ppp in np.arange(L)]
 
@@ -353,115 +358,16 @@ def run_epistatic_ssm(pdb, cfg, model,
 
     # grab double mutation inputs
     MUT_POS, MUT_WT_AA, MUT_MUT_AA = get_ssm_mutations_double(pdb, distance)
-    # dataset = SSMDataset(MUT_POS, MUT_WT_AA, MUT_MUT_AA)
-    # loader = DataLoader(dataset, shuffle=False, batch_size=args.batch_size, num_workers=8)
+    dataset = SSMDataset(MUT_POS, MUT_WT_AA, MUT_MUT_AA)
+    loader = DataLoader(dataset, shuffle=False, batch_size=batch_size, num_workers=8)
 
-    # preds = run_double(all_mpnn_hid, mpnn_embed, cfg, loader, args, model, X, mask, mpnn_edges)
-    # ddg, mutations = format_output_epistatic(preds, S, MUT_POS, MUT_WT_AA, MUT_MUT_AA, args.threshold)
+    preds = run_double(all_mpnn_hid, mpnn_embed, cfg, loader, batch_size, model, X, mask, mpnn_edges)
+    ddg, mutations = format_output_epistatic(preds, S, MUT_POS, MUT_WT_AA, MUT_MUT_AA, threshold)
     
-    # etime = time.time()
-    # elapsed = etime - stime
-    # print(f'ThermoMPNN double mutant epistatic model predictions generated in {round(elapsed, 2)} seconds.')
-    # return ddg, mutations
-
-
-
-def renumber_pdb(df, args):
-    """Renumber output mutations to match PDB numbering for interpretation"""
-    # parse PDB
-    chains = get_chains(args.pdb, args.chains)
-    pdb = custom_parse_PDB(args.pdb, input_chain_list=chains)[0]
-
-    if (args.mode == 'additive') or (args.mode == 'epistatic'):
-        # grab positions
-        df[['mut1', 'mut2']] = df['Mutation'].str.split(':', n=2, expand=True)
-        df['pos1'] = df['mut1'].str[1:-1].astype(int) - 1
-        df['pos2'] = df['mut2'].str[1:-1].astype(int) - 1
-
-        df['pos1'] = idx_to_pdb_num(pdb, df['pos1'].values)
-        df['pos2'] = idx_to_pdb_num(pdb, df['pos2'].values)
-
-        df['wt1'], df['wt2'] = df['mut1'].str[0], df['mut2'].str[0]
-        df['mt1'], df['mt2'] = df['mut1'].str[-1], df['mut2'].str[-1]
-
-        df['Mutation'] = df['wt1'] + df['pos1'] + df['mt1'] + ':' + df['wt2'] + df['pos2'] + df['mt2']
-        df = df[['ddG (kcal/mol)', 'Mutation', 'CA-CA Distance']].reset_index(drop=True)
-
-    else:
-        # grab position
-        df['pos'] = df['Mutation'].str[1:-1].astype(int) - 1
-
-        df['pos'] = idx_to_pdb_num(pdb, df['pos'].values)
-        df['wt'] = df['Mutation'].str[0]
-        df['mt'] = df['Mutation'].str[-1]
-
-        df['Mutation'] = df['wt'] + df['pos'] + df['mt']   
-        df = df[['ddG (kcal/mol)', 'Mutation']].reset_index(drop=True)
-
-    print(f'ThermoMPNN predictions renumbered.')
-    return df 
-
-
-def disulfide_penalty(df, pdb_file, chain_list, model):
-  """Automatically detects disulfide breakage based on Cys-Cys distance."""
-
-  chain_list = get_chains(pdb_file, chain_list)
-  pdb_dict = custom_parse_PDB(pdb_file, input_chain_list=chain_list, side_chains=True)
-
-  # collect all SG coordinates from all chains
-  coords_all = [k for k in pdb_dict[0].keys() if k.startswith('coords')]
-  chains = [c[-1] for c in coords_all]
-  sg_coords = [pdb_dict[0][c][f'SG_chain_{chain}'] for c, chain in zip(coords_all, chains)]
-  sg_coords = np.concatenate(sg_coords, axis=0)
-
-  # calculate pairwise distance and threshold to find disulfides
-  dist = cdist(sg_coords, sg_coords)
-  dist = np.nan_to_num(dist, 10000)
-  hits = np.where((dist < 3) & (dist > 0)) # tuple of two [N] arrays of indices
-
-  if model == 'single':
-    df['wtAA'] = df['Mutation'].str[0]
-    df['mutAA'] = df['Mutation'].str[-1]
-    df['pos'] = df['Mutation'].str[1:-1].astype(int) - 1
-
-    # match hit indices to actual resns for penalty
-    bad_resns = []
-    for h in hits[0]:
-      bad_resns.append(h)
-
-    print('Identified the following disulfide engaged residues:', bad_resns)
-
-    # apply penalty
-    penalty = 2  # in kcal/mol - higher is less stable
-    mask = df['pos'].isin(bad_resns) & (df['wtAA'] != df['mutAA'])
-
-    df.loc[mask, 'ddG (kcal/mol)'] = df.loc[mask, 'ddG (kcal/mol)'] + penalty
-    return df[['Mutation', 'ddG (kcal/mol)']].reset_index(drop=True)
-
-  else:
-    df[['mut1', 'mut2']] = df['Mutation'].str.split(':', n=2, expand=True)
-    df['wtAA1'] = df['mut1'].str[0]
-    df['mutAA1'] = df['mut1'].str[-1]
-    df['pos1'] = df['mut1'].str[1:-1].astype(int) - 1
-
-    df['wtAA2'] = df['mut2'].str[0]
-    df['mutAA2'] = df['mut2'].str[-1]
-    df['pos2'] = df['mut2'].str[1:-1].astype(int) - 1
-
-    bad_resns = []
-    for h in hits[0]:
-      bad_resns.append(h)
-
-    print('Identified the following disulfide engaged residues:', bad_resns)
-
-    # apply penalty
-    penalty = 2  # in kcal/mol - higher is less stable
-    mask = df['pos1'].isin(bad_resns) & (df['wtAA1'] != df['mutAA1'])
-    mask2 = df['pos2'].isin(bad_resns) & (df['wtAA2'] != df['mutAA2'])
-    mask = mask | mask2
-
-    df.loc[mask, 'ddG (kcal/mol)'] = df.loc[mask, 'ddG (kcal/mol)'] + penalty
-    return df[['Mutation', 'ddG (kcal/mol)', 'CA-CA Distance']].reset_index(drop=True)
+    etime = time.time()
+    elapsed = etime - stime
+    print(f'ThermoMPNN double mutant epistatic model predictions generated in {round(elapsed, 2)} seconds.')
+    return ddg, mutations
 
 
 def main(args):
@@ -478,31 +384,31 @@ def main(args):
         if args.mode == 'single':
             ddg, mutations = format_output_single(ddg, S, args.threshold)
         else:
-            ddg, mutations = format_output_double(ddg, S, args.threshold)
+            ddg, mutations = format_output_double(ddg, S, args.threshold, pdb_data, args.distance)
 
     elif args.mode == 'epistatic':
         ddg, mutations = run_epistatic_ssm(pdb_data, cfg, model, 
                                            args.distance, args.threshold, args.batch_size)
 
     else:
-        raise ValueError
+        raise ValueError("Invalid mode selected!")
 
     df = pd.DataFrame({
         'ddG (kcal/mol)': ddg, 
         'Mutation': mutations
     })
 
-    # if args.mode != 'single':
-        # df = distance_filter(df, args)
+    if args.mode != 'single':
+        df = distance_filter(df, pdb_data, args.distance)
     
     if args.ss_penalty:
-        df = disulfide_penalty(df, args.pdb, args.chains, model=args.mode)
+        df = disulfide_penalty(df, pdb_data, args.mode)
 
     df = df.dropna(subset=['ddG (kcal/mol)'])
     if args.threshold <= -0.:
         df = df.sort_values(by=['ddG (kcal/mol)'])
 
-    if args.mode != 'single': # sort to have same output order
+    if args.mode != 'single': # sort to have neat output order
         df[['mut1', 'mut2']] = df['Mutation'].str.split(':', n=2, expand=True)
         df['pos1'] = df['mut1'].str[1:-1].astype(int) + 1
         df['pos2'] = df['mut2'].str[1:-1].astype(int) + 1
@@ -511,7 +417,8 @@ def main(args):
         df = df[['ddG (kcal/mol)', 'Mutation', 'CA-CA Distance']].reset_index(drop=True)
 
     try:
-      df = renumber_pdb(df, args)
+      df = renumber_pdb(df, pdb_data, args.mode)
+
     except (KeyError, IndexError):
       print('PDB renumbering failed (sorry!) You can still use the raw position data. Or, you can renumber your PDB, fill any weird gaps, and try again.')
     
@@ -529,6 +436,6 @@ if __name__ == "__main__":
     parser.add_argument('--out', type=str, help='output mutation prefix to save csv', default='ssm')
     parser.add_argument('--chains', nargs='+', help='chain(s) to use. Default is None, which will use all chains. Example: A B C')
     parser.add_argument('--threshold', type=float, default=-0.5, help='Threshold for SSM sweep. By default, ThermoMPNN only saves mutations below this threshold (-0.5 kcal/mol). To save all mutations, set this really high (e.g., 100)')
-    parser.add_argument('--distance', type=float, default=10.0, help='Filter for double mutant predictions using pairwise Ca distance cutoff (default is 5 A).')
+    parser.add_argument('--distance', type=float, default=5.0, help='Filter for double mutant predictions using pairwise Ca distance cutoff (default is 5 A).')
     parser.add_argument('--ss_penalty', action='store_true', help='Add explicit disulfide breakage penalty. Default is False.')
     main(parser.parse_args())
