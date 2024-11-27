@@ -1,42 +1,47 @@
 import argparse
 import os
-import torch
-import numpy as np
-import re
-import pandas as pd
-from omegaconf import OmegaConf
-from tqdm import tqdm
 import time
-from torch.utils.data import DataLoader
-from scipy.spatial.distance import cdist
 
-
-from thermompnn.datasets.v2_datasets import tied_featurize_mut
+import numpy as np
+import pandas as pd
+import torch
 from thermompnn.datasets.dataset_utils import Mutation
-from thermompnn.model.v2_model import batched_index_select, _dist
-from thermompnn.ssm_utils import get_config, get_model, load_pdb, distance_filter, disulfide_penalty, renumber_pdb, get_dmat
+from thermompnn.datasets.v2_datasets import tied_featurize_mut
+from thermompnn.model.v2_model import _dist, batched_index_select
+from thermompnn.ssm_utils import (
+    distance_filter,
+    disulfide_penalty,
+    get_config,
+    get_dmat,
+    get_model,
+    load_pdb,
+    renumber_pdb,
+)
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 
 def get_ssm_mutations_double(pdb, dthresh):
     # make mutation list for SSM run
-    ALPHABET = 'ACDEFGHIKLMNPQRSTVWYX'
+    ALPHABET = "ACDEFGHIKLMNPQRSTVWYX"
     MUT_POS, MUT_WT = [], []
-    for seq_pos in range(len(pdb['seq'])):
-        wtAA = pdb['seq'][seq_pos]
+    for seq_pos in range(len(pdb["seq"])):
+        wtAA = pdb["seq"][seq_pos]
         # check for missing residues
-        if wtAA != '-':
+        if wtAA != "-":
             MUT_POS.append(seq_pos)
             MUT_WT.append(wtAA)
         else:
-            MUT_WT.append('-')
+            MUT_WT.append("-")
 
     # Use distance filter BEFORE data setup / inference for speedup
     from thermompnn.ssm_utils import get_dmat
-    dmat = np.triu(get_dmat(pdb)) # [L, L]
+
+    dmat = np.triu(get_dmat(pdb))  # [L, L]
     mask = (dmat < dthresh) & (dmat > 0.0)
     pos1, pos2 = np.where(mask)
     pos_combos = [(p1, p2) for p1, p2 in zip(pos1, pos2)]
-    pos_combos = np.array(pos_combos) # [combos, 2]
+    pos_combos = np.array(pos_combos)  # [combos, 2]
     wtAA = np.zeros_like(pos_combos)
     # fill in wtAA for each pos combo
     for p_idx in range(pos_combos.shape[0]):
@@ -46,7 +51,7 @@ def get_ssm_mutations_double(pdb, dthresh):
     # make default mutAA bundle for broadcasting
     one = np.arange(20).repeat(20)
     two = np.tile(np.arange(20), 20)
-    mutAA = np.stack([one, two]).T # [400, 2]
+    mutAA = np.stack([one, two]).T  # [400, 2]
     n_comb = pos_combos.shape[0]
     mutAA = np.tile(mutAA, (n_comb, 1))
 
@@ -70,10 +75,12 @@ def get_ssm_mutations_double(pdb, dthresh):
     return torch.tensor(pos_combos), torch.tensor(wtAA), torch.tensor(mutAA)
 
 
-def run_double(all_mpnn_hid, mpnn_embed, cfg, loader, batch_size, model, X, mask, mpnn_edges_raw):
+def run_double(
+    all_mpnn_hid, mpnn_embed, cfg, loader, batch_size, model, X, mask, mpnn_edges_raw
+):
     """Batched mutation processing using shared protein embeddings and only stability prediction module head"""
-    device = 'cuda'
-    all_mpnn_hid = torch.cat(all_mpnn_hid[:cfg.model.num_final_layers], -1)
+    device = "cuda"
+    all_mpnn_hid = torch.cat(all_mpnn_hid[: cfg.model.num_final_layers], -1)
     all_mpnn_hid = all_mpnn_hid.repeat(batch_size, 1, 1)
     mpnn_embed = mpnn_embed.repeat(batch_size, 1, 1)
     mpnn_edges_raw = mpnn_edges_raw.repeat(batch_size, 1, 1, 1)
@@ -90,82 +97,126 @@ def run_double(all_mpnn_hid, mpnn_embed, cfg, loader, batch_size, model, X, mask
         mut_mutant_AAs = mutAA
         mut_positions = pos
         REAL_batch_size = mutAA.shape[0]
-                        
+
         # get sequence embedding for mutant aa
         mut_embed_list = []
         for m in range(mut_mutant_AAs.shape[-1]):
             mut_embed_list.append(model.prot_mpnn.W_s(mut_mutant_AAs[:, m]))
-        mut_embed = torch.cat([m.unsqueeze(-1) for m in mut_embed_list], -1) # shape: (Batch, Embed, N_muts)
+        mut_embed = torch.cat(
+            [m.unsqueeze(-1) for m in mut_embed_list], -1
+        )  # shape: (Batch, Embed, N_muts)
 
         n_mutations = [0, 1]
         edges = []
         for n_current in n_mutations:  # iterate over N-order mutations
             # select the edges at the current mutated positions
-            if REAL_batch_size != mpnn_edges_raw.shape[0]: # last batch will throw error if not corrected
+            if (
+                REAL_batch_size != mpnn_edges_raw.shape[0]
+            ):  # last batch will throw error if not corrected
                 mpnn_edges_raw = mpnn_edges_raw[:REAL_batch_size, ...]
                 E_idx = E_idx[:REAL_batch_size, ...]
                 all_mpnn_hid = all_mpnn_hid[:REAL_batch_size, ...]
                 mpnn_embed = mpnn_embed[:REAL_batch_size, ...]
 
-            mpnn_edges_tmp = torch.squeeze(batched_index_select(mpnn_edges_raw, 1, mut_positions[:, n_current:n_current+1]), 1)
-            E_idx_tmp = torch.squeeze(batched_index_select(E_idx, 1, mut_positions[:, n_current:n_current+1]), 1)
+            mpnn_edges_tmp = torch.squeeze(
+                batched_index_select(
+                    mpnn_edges_raw, 1, mut_positions[:, n_current : n_current + 1]
+                ),
+                1,
+            )
+            E_idx_tmp = torch.squeeze(
+                batched_index_select(
+                    E_idx, 1, mut_positions[:, n_current : n_current + 1]
+                ),
+                1,
+            )
 
             n_other = [a for a in n_mutations if a != n_current]
-            mp_other = mut_positions[:, n_other] # [B, 1]
+            mp_other = mut_positions[:, n_other]  # [B, 1]
             # E_idx_tmp [B, K]
-            mp_other = mp_other[..., None].repeat(1, 1, E_idx_tmp.shape[-1]) # [B, 1, 48]
-            idx = torch.where(E_idx_tmp[:, None, :] == mp_other) # get indices where the neighbor list matches the mutations we want
+            mp_other = mp_other[..., None].repeat(
+                1, 1, E_idx_tmp.shape[-1]
+            )  # [B, 1, 48]
+            idx = torch.where(
+                E_idx_tmp[:, None, :] == mp_other
+            )  # get indices where the neighbor list matches the mutations we want
             a, b, c = idx
             # start w/empty edges and fill in as you go, then set remaining edges to 0
-            edge = torch.full([REAL_batch_size, mpnn_edges_tmp.shape[-1]], torch.nan, device=E_idx.device) # [B, 128]
+            edge = torch.full(
+                [REAL_batch_size, mpnn_edges_tmp.shape[-1]],
+                torch.nan,
+                device=E_idx.device,
+            )  # [B, 128]
             # idx is (a, b, c) tuple of tensors
             # a has indices of batch members; b is all 0s; c has indices of actual neighbors for edge grabbing
             edge[a, :] = mpnn_edges_tmp[a, c, :]
             edge = torch.nan_to_num(edge, nan=0)
             edges.append(edge)
 
-        mpnn_edges = torch.stack(edges, dim=-1) # this should get two edges per set of doubles (one for each)
+        mpnn_edges = torch.stack(
+            edges, dim=-1
+        )  # this should get two edges per set of doubles (one for each)
 
         # gather final representation from seq and structure embeddings
-        final_embed = [] 
+        final_embed = []
         for i in range(mut_mutant_AAs.shape[-1]):
             # gather embedding for a specific position
-            current_positions = mut_positions[:, i:i+1] # [B, 1]
-            g_struct_embed = torch.gather(all_mpnn_hid, 1, current_positions.unsqueeze(-1).expand(current_positions.size(0), current_positions.size(1), all_mpnn_hid.size(2)))
-            g_struct_embed = torch.squeeze(g_struct_embed, 1) # [B, E * nfl]
+            current_positions = mut_positions[:, i : i + 1]  # [B, 1]
+            g_struct_embed = torch.gather(
+                all_mpnn_hid,
+                1,
+                current_positions.unsqueeze(-1).expand(
+                    current_positions.size(0),
+                    current_positions.size(1),
+                    all_mpnn_hid.size(2),
+                ),
+            )
+            g_struct_embed = torch.squeeze(g_struct_embed, 1)  # [B, E * nfl]
             # add specific mutant embedding to gathered embed based on which mutation is being gathered
-            g_seq_embed = torch.gather(mpnn_embed, 1, current_positions.unsqueeze(-1).expand(current_positions.size(0), current_positions.size(1), mpnn_embed.size(2)))
-            g_seq_embed = torch.squeeze(g_seq_embed, 1) # [B, E]
+            g_seq_embed = torch.gather(
+                mpnn_embed,
+                1,
+                current_positions.unsqueeze(-1).expand(
+                    current_positions.size(0),
+                    current_positions.size(1),
+                    mpnn_embed.size(2),
+                ),
+            )
+            g_seq_embed = torch.squeeze(g_seq_embed, 1)  # [B, E]
             # if mut embed enabled, subtract it from the wt embed directly to keep dims low
             if cfg.model.mutant_embedding:
                 if REAL_batch_size != mut_embed.shape[0]:
                     mut_embed = mut_embed[:REAL_batch_size, ...]
-                g_seq_embed = g_seq_embed - mut_embed[:, :, i] # [B, E]
-            g_embed = torch.cat([g_struct_embed, g_seq_embed], -1) # [B, E * (nfl + 1)]
+                g_seq_embed = g_seq_embed - mut_embed[:, :, i]  # [B, E]
+            g_embed = torch.cat([g_struct_embed, g_seq_embed], -1)  # [B, E * (nfl + 1)]
 
             # if edges enabled, concatenate them onto the end of the embedding
             if cfg.model.edges:
                 g_edge_embed = mpnn_edges[:, :, i]
-                g_embed = torch.cat([g_embed, g_edge_embed], -1) # [B, E * (nfl + 2)]
-            final_embed.append(g_embed)  # list with length N_mutations - used to make permutations
-        final_embed = torch.stack(final_embed, dim=0) # [2, B, E x (nfl + 1)]
+                g_embed = torch.cat([g_embed, g_edge_embed], -1)  # [B, E * (nfl + 2)]
+            final_embed.append(
+                g_embed
+            )  # list with length N_mutations - used to make permutations
+        final_embed = torch.stack(final_embed, dim=0)  # [2, B, E x (nfl + 1)]
 
         # do initial dim reduction
-        final_embed = model.light_attention(final_embed) # [2, B, E]
+        final_embed = model.light_attention(final_embed)  # [2, B, E]
 
         # if batch is only single mutations, pad it out with a "zero" mutation
         if final_embed.shape[0] == 1:
-            zero_embed = torch.zeros(final_embed.shape, dtype=torch.float32, device=E_idx.device)
+            zero_embed = torch.zeros(
+                final_embed.shape, dtype=torch.float32, device=E_idx.device
+            )
             final_embed = torch.cat([final_embed, zero_embed], dim=0)
 
         # make two copies, one with AB order and other with BA order of mutation
         embedAB = torch.cat((final_embed[0, :, :], final_embed[1, :, :]), dim=-1)
         embedBA = torch.cat((final_embed[1, :, :], final_embed[0, :, :]), dim=-1)
 
-        ddG_A = model.ddg_out(embedAB) # [B, 1]
-        ddG_B = model.ddg_out(embedBA) # [B, 1]
+        ddG_A = model.ddg_out(embedAB)  # [B, 1]
+        ddG_B = model.ddg_out(embedBA)  # [B, 1]
 
-        ddg = (ddG_A + ddG_B) / 2.
+        ddg = (ddG_A + ddG_B) / 2.0
         preds += list(torch.squeeze(ddg, dim=-1).detach().cpu().numpy())
     return np.squeeze(preds)
 
@@ -178,9 +229,8 @@ class SSMDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return self.POS.shape[0]
-    
-    def __getitem__(self, index):
 
+    def __getitem__(self, index):
         return self.POS[index, :], self.WTAA[index, :], self.MUTAA[index, :]
 
 
@@ -190,14 +240,27 @@ def run_single_ssm(pdb, cfg, model):
     model.eval()
     model.cuda()
     stime = time.time()
-    
+
     # placeholder mutation to keep featurization from throwing error
-    pdb['mutation'] = Mutation([0], ['A'], ['A'], [0.], '')
+    pdb["mutation"] = Mutation([0], ["A"], ["A"], [0.0], "")
 
     # featurize input
-    device = 'cuda'
+    device = "cuda"
     batch = tied_featurize_mut([pdb])
-    X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask = batch
+    (
+        X,
+        S,
+        mask,
+        lengths,
+        chain_M,
+        chain_encoding_all,
+        residue_idx,
+        mut_positions,
+        mut_wildtype_AAs,
+        mut_mutant_AAs,
+        mut_ddGs,
+        atom_mask,
+    ) = batch
 
     X = X.to(device)
     S = S.to(device)
@@ -210,24 +273,28 @@ def run_single_ssm(pdb, cfg, model):
 
     # do single pass through thermompnn
     X = torch.nan_to_num(X, nan=0.0)
-    all_mpnn_hid, mpnn_embed, _, mpnn_edges = model.prot_mpnn(X, S, mask, chain_M, residue_idx, chain_encoding_all)
+    all_mpnn_hid, mpnn_embed, _, mpnn_edges = model.prot_mpnn(
+        X, S, mask, chain_M, residue_idx, chain_encoding_all
+    )
 
-    all_mpnn_hid = torch.cat(all_mpnn_hid[:cfg.model.num_final_layers], -1)
-    all_mpnn_hid = torch.squeeze(torch.cat([all_mpnn_hid, mpnn_embed], -1), 0) # [L, E]
+    all_mpnn_hid = torch.cat(all_mpnn_hid[: cfg.model.num_final_layers], -1)
+    all_mpnn_hid = torch.squeeze(torch.cat([all_mpnn_hid, mpnn_embed], -1), 0)  # [L, E]
 
     all_mpnn_hid = model.light_attention(torch.unsqueeze(all_mpnn_hid, -1))
 
-    ddg = model.ddg_out(all_mpnn_hid) # [L, 21]
+    ddg = model.ddg_out(all_mpnn_hid)  # [L, 21]
 
     # subtract wildtype ddgs to normalize
-    S = torch.squeeze(S) # [L, ]
+    S = torch.squeeze(S)  # [L, ]
 
-    wt_ddg = batched_index_select(ddg, dim=-1, index=S) # [L, 1]
-    ddg = ddg - wt_ddg.expand(-1, 21) # [L, 21]
+    wt_ddg = batched_index_select(ddg, dim=-1, index=S)  # [L, 1]
+    ddg = ddg - wt_ddg.expand(-1, 21)  # [L, 21]
     etime = time.time()
     elapsed = etime - stime
     length = ddg.shape[0]
-    print(f'ThermoMPNN single mutant predictions generated for protein of length {length} in {round(elapsed, 2)} seconds.')
+    print(
+        f"ThermoMPNN single mutant predictions generated for protein of length {length} in {round(elapsed, 2)} seconds."
+    )
     return ddg, S
 
 
@@ -235,9 +302,9 @@ def expand_additive(ddg):
     """Uses torch broadcasting to add all possible single mutants to each other in a vectorized operation."""
     # ddg [L, 21]
     dims = ddg.shape
-    ddgA = ddg.reshape(dims[0], dims[1], 1, 1) # [L, 21, 1, 1]
-    ddgB = ddg.reshape(1, 1, dims[0], dims[1]) # [1, 1, L, 21]
-    ddg = ddgA + ddgB # L, 21, L, 21
+    ddgA = ddg.reshape(dims[0], dims[1], 1, 1)  # [L, 21, 1, 1]
+    ddgB = ddg.reshape(1, 1, dims[0], dims[1])  # [1, 1, L, 21]
+    ddg = ddgA + ddgB  # L, 21, L, 21
 
     # mask out diagonal representing two mutations at the same position - this is invalid
     for i in range(dims[0]):
@@ -248,12 +315,12 @@ def expand_additive(ddg):
 
 def format_output_single(ddg, S, threshold=-0.5):
     """Converts raw SSM predictions into nice format for analysis"""
-    ALPHABET = 'ACDEFGHIKLMNPQRSTVWYX'
+    ALPHABET = "ACDEFGHIKLMNPQRSTVWYX"
     ddg = ddg.cpu().detach().numpy()
     ddg = ddg[:, :20]
 
     keep_L, keep_AA = np.where(ddg <= threshold)
-    ddg = ddg[ddg <= threshold] # [N, ]
+    ddg = ddg[ddg <= threshold]  # [N, ]
 
     mutlist = []
     for L_idx, AA_idx in tqdm(zip(keep_L, keep_AA)):
@@ -267,20 +334,24 @@ def format_output_single(ddg, S, threshold=-0.5):
 def format_output_double(ddg, S, threshold, pdb, distance):
     """Converts raw SSM predictions into nice format for analysis"""
     stime = time.time()
-    ALPHABET = 'ACDEFGHIKLMNPQRSTVWYX'
-    ddg = ddg.cpu().detach().numpy() # [L, 21]
+    ALPHABET = "ACDEFGHIKLMNPQRSTVWYX"
+    ddg = ddg.cpu().detach().numpy()  # [L, 21]
     L, AA = ddg.shape
 
-    ddg = expand_additive(ddg) # [L, 21, L, 21]
-    ddg = ddg[:, :20, :, :20] # drop X predictions
+    ddg = expand_additive(ddg)  # [L, 21, L, 21]
+    ddg = ddg[:, :20, :, :20]  # drop X predictions
 
     # Pre-mask matrix with distance constraints for speedup
     dmat = get_dmat(pdb)
     assert ddg.shape[0] == dmat.shape[0]
-    valid_mask = (ddg <= threshold) * (dmat < distance)[:, None, :, None] * (dmat != 0.0)[:, None, :, None]
+    valid_mask = (
+        (ddg <= threshold)
+        * (dmat < distance)[:, None, :, None]
+        * (dmat != 0.0)[:, None, :, None]
+    )
     p1s, a1s, p2s, a2s = np.where(valid_mask)
 
-    cond = (p1s < p2s) # filter to keep only upper triangle
+    cond = p1s < p2s  # filter to keep only upper triangle
     p1s, a1s, p2s, a2s = p1s[cond], a1s[cond], p2s[cond], a2s[cond]
     wt_seq = [ALPHABET[S[ppp]] for ppp in np.arange(L)]
 
@@ -289,21 +360,23 @@ def format_output_double(ddg, S, threshold, pdb, distance):
         wt1, wt2 = wt_seq[p1], wt_seq[p2]
         mut1, mut2 = ALPHABET[a1], ALPHABET[a2]
 
-        if (wt1 != mut1) and (wt2 != mut2): # drop self-mutations
-            mutation = f'{wt1}{p1 + 1}{mut1}:{wt2}{p2 + 1}{mut2}'
+        if (wt1 != mut1) and (wt2 != mut2):  # drop self-mutations
+            mutation = f"{wt1}{p1 + 1}{mut1}:{wt2}{p2 + 1}{mut2}"
             mutlist.append(mutation)
             ddglist.append(ddg[p1, a1, p2, a2])
 
     etime = time.time()
     elapsed = etime - stime
-    print(f'ThermoMPNN double mutant additive model predictions calculated in {round(elapsed, 2)} seconds.')
+    print(
+        f"ThermoMPNN double mutant additive model predictions calculated in {round(elapsed, 2)} seconds."
+    )
     return ddglist, mutlist
 
 
 def format_output_epistatic(ddg, S, pos, wtAA, mutAA, threshold=-0.5):
     "Converts raw SSM predictions into nice format for analysis."
     stime = time.time()
-    ALPHABET = 'ACDEFGHIKLMNPQRSTVWYX'
+    ALPHABET = "ACDEFGHIKLMNPQRSTVWYX"
     S = torch.squeeze(S)
 
     # filter out ddgs that miss the threshold
@@ -319,29 +392,43 @@ def format_output_epistatic(ddg, S, pos, wtAA, mutAA, threshold=-0.5):
         w2 = ALPHABET[wtAA[b, 1]]
         m1 = ALPHABET[mutAA[b, 0]]
         m2 = ALPHABET[mutAA[b, 1]]
-        mut_name = f'{w1}{pos[b, 0] + 1}{m1}:{w2}{pos[b, 1] + 1}{m2}'
+        mut_name = f"{w1}{pos[b, 0] + 1}{m1}:{w2}{pos[b, 1] + 1}{m2}"
         mut_list.append(mut_name)
     etime = time.time()
     elapsed = etime - stime
-    print(f'ThermoMPNN double mutant epistatic model predictions sorted and filtered in {round(elapsed, 2)} seconds.')
+    print(
+        f"ThermoMPNN double mutant epistatic model predictions sorted and filtered in {round(elapsed, 2)} seconds."
+    )
     return ddg, mut_list
 
 
-def run_epistatic_ssm(pdb, cfg, model, 
-                      distance, threshold, batch_size):
-    """Run epistatic model on double mutations """
+def run_epistatic_ssm(pdb, cfg, model, distance, threshold, batch_size):
+    """Run epistatic model on double mutations"""
 
     model.eval()
     model.cuda()
     stime = time.time()
 
     # placeholder mutation to keep featurization from throwing error
-    pdb['mutation'] = Mutation([0], ['A'], ['A'], [0.], '') 
+    pdb["mutation"] = Mutation([0], ["A"], ["A"], [0.0], "")
 
     # featurize input
-    device = 'cuda'
+    device = "cuda"
     batch = tied_featurize_mut([pdb])
-    X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask = batch
+    (
+        X,
+        S,
+        mask,
+        lengths,
+        chain_M,
+        chain_encoding_all,
+        residue_idx,
+        mut_positions,
+        mut_wildtype_AAs,
+        mut_mutant_AAs,
+        mut_ddGs,
+        atom_mask,
+    ) = batch
 
     X = X.to(device)
     S = S.to(device)
@@ -354,88 +441,126 @@ def run_epistatic_ssm(pdb, cfg, model,
 
     # do single pass through thermompnn
     X = torch.nan_to_num(X, nan=0.0)
-    all_mpnn_hid, mpnn_embed, _, mpnn_edges = model.prot_mpnn(X, S, mask, chain_M, residue_idx, chain_encoding_all)
+    all_mpnn_hid, mpnn_embed, _, mpnn_edges = model.prot_mpnn(
+        X, S, mask, chain_M, residue_idx, chain_encoding_all
+    )
 
     # grab double mutation inputs
     MUT_POS, MUT_WT_AA, MUT_MUT_AA = get_ssm_mutations_double(pdb, distance)
     dataset = SSMDataset(MUT_POS, MUT_WT_AA, MUT_MUT_AA)
     loader = DataLoader(dataset, shuffle=False, batch_size=batch_size, num_workers=8)
 
-    preds = run_double(all_mpnn_hid, mpnn_embed, cfg, loader, batch_size, model, X, mask, mpnn_edges)
-    ddg, mutations = format_output_epistatic(preds, S, MUT_POS, MUT_WT_AA, MUT_MUT_AA, threshold)
-    
+    preds = run_double(
+        all_mpnn_hid, mpnn_embed, cfg, loader, batch_size, model, X, mask, mpnn_edges
+    )
+    ddg, mutations = format_output_epistatic(
+        preds, S, MUT_POS, MUT_WT_AA, MUT_MUT_AA, threshold
+    )
+
     etime = time.time()
     elapsed = etime - stime
-    print(f'ThermoMPNN double mutant epistatic model predictions generated in {round(elapsed, 2)} seconds.')
+    print(
+        f"ThermoMPNN double mutant epistatic model predictions generated in {round(elapsed, 2)} seconds."
+    )
     return ddg, mutations
 
 
 def main(args):
-
     cfg = get_config(args.mode)
     model = get_model(args.mode, cfg)
     pdb_data = load_pdb(args.pdb, args.chains)
     pdbname = os.path.basename(args.pdb)
-    print(f'Loaded PDB {pdbname}')
+    print(f"Loaded PDB {pdbname}")
 
-    if (args.mode == 'single') or (args.mode == 'additive'):
+    if (args.mode == "single") or (args.mode == "additive"):
         ddg, S = run_single_ssm(pdb_data, cfg, model)
 
-        if args.mode == 'single':
+        if args.mode == "single":
             ddg, mutations = format_output_single(ddg, S, args.threshold)
         else:
-            ddg, mutations = format_output_double(ddg, S, args.threshold, pdb_data, args.distance)
+            ddg, mutations = format_output_double(
+                ddg, S, args.threshold, pdb_data, args.distance
+            )
 
-    elif args.mode == 'epistatic':
-        ddg, mutations = run_epistatic_ssm(pdb_data, cfg, model, 
-                                           args.distance, args.threshold, args.batch_size)
+    elif args.mode == "epistatic":
+        ddg, mutations = run_epistatic_ssm(
+            pdb_data, cfg, model, args.distance, args.threshold, args.batch_size
+        )
 
     else:
         raise ValueError("Invalid mode selected!")
 
-    df = pd.DataFrame({
-        'ddG (kcal/mol)': ddg, 
-        'Mutation': mutations
-    })
+    df = pd.DataFrame({"ddG (kcal/mol)": ddg, "Mutation": mutations})
 
-    if args.mode != 'single':
+    if args.mode != "single":
         df = distance_filter(df, pdb_data, args.distance)
-    
+
     if args.ss_penalty:
         df = disulfide_penalty(df, pdb_data, args.mode)
 
-    df = df.dropna(subset=['ddG (kcal/mol)'])
-    if args.threshold <= -0.:
-        df = df.sort_values(by=['ddG (kcal/mol)'])
+    df = df.dropna(subset=["ddG (kcal/mol)"])
+    if args.threshold <= -0.0:
+        df = df.sort_values(by=["ddG (kcal/mol)"])
 
-    if args.mode != 'single': # sort to have neat output order
-        df[['mut1', 'mut2']] = df['Mutation'].str.split(':', n=2, expand=True)
-        df['pos1'] = df['mut1'].str[1:-1].astype(int) + 1
-        df['pos2'] = df['mut2'].str[1:-1].astype(int) + 1
+    if args.mode != "single":  # sort to have neat output order
+        df[["mut1", "mut2"]] = df["Mutation"].str.split(":", n=2, expand=True)
+        df["pos1"] = df["mut1"].str[1:-1].astype(int) + 1
+        df["pos2"] = df["mut2"].str[1:-1].astype(int) + 1
 
-        df = df.sort_values(by=['pos1', 'pos2'])
-        df = df[['ddG (kcal/mol)', 'Mutation', 'CA-CA Distance']].reset_index(drop=True)
+        df = df.sort_values(by=["pos1", "pos2"])
+        df = df[["ddG (kcal/mol)", "Mutation", "CA-CA Distance"]].reset_index(drop=True)
 
     try:
-      df = renumber_pdb(df, pdb_data, args.mode)
+        df = renumber_pdb(df, pdb_data, args.mode)
 
     except (KeyError, IndexError):
-      print('PDB renumbering failed (sorry!) You can still use the raw position data. Or, you can renumber your PDB, fill any weird gaps, and try again.')
-    
-    df.to_csv(args.out + '.csv')
+        print(
+            "PDB renumbering failed (sorry!) You can still use the raw position data. Or, you can renumber your PDB, fill any weird gaps, and try again."
+        )
+
+    df.to_csv(args.out + ".csv")
 
     return
 
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', type=str, help='SSM mode to use (single | additive | epistatic)', default='single')
-    parser.add_argument('--pdb', type=str, help='PDB file to run', default='./2OCJ.pdb')
-    parser.add_argument('--batch_size', type=int, help='batch size for stability prediction module', default=256)
-    parser.add_argument('--out', type=str, help='output mutation prefix to save csv', default='ssm')
-    parser.add_argument('--chains', nargs='+', help='chain(s) to use. Default is None, which will use all chains. Example: A B C')
-    parser.add_argument('--threshold', type=float, default=-0.5, help='Threshold for SSM sweep. By default, ThermoMPNN only saves mutations below this threshold (-0.5 kcal/mol). To save all mutations, set this really high (e.g., 100)')
-    parser.add_argument('--distance', type=float, default=5.0, help='Filter for double mutant predictions using pairwise Ca distance cutoff (default is 5 A).')
-    parser.add_argument('--ss_penalty', action='store_true', help='Add explicit disulfide breakage penalty. Default is False.')
+    parser.add_argument(
+        "--mode",
+        type=str,
+        help="SSM mode to use (single | additive | epistatic)",
+        default="single",
+    )
+    parser.add_argument("--pdb", type=str, help="PDB file to run", default="./2OCJ.pdb")
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        help="batch size for stability prediction module",
+        default=256,
+    )
+    parser.add_argument(
+        "--out", type=str, help="output mutation prefix to save csv", default="ssm"
+    )
+    parser.add_argument(
+        "--chains",
+        nargs="+",
+        help="chain(s) to use. Default is None, which will use all chains. Example: A B C",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=-0.5,
+        help="Threshold for SSM sweep. By default, ThermoMPNN only saves mutations below this threshold (-0.5 kcal/mol). To save all mutations, set this really high (e.g., 100)",
+    )
+    parser.add_argument(
+        "--distance",
+        type=float,
+        default=5.0,
+        help="Filter for double mutant predictions using pairwise Ca distance cutoff (default is 5 A).",
+    )
+    parser.add_argument(
+        "--ss_penalty",
+        action="store_true",
+        help="Add explicit disulfide breakage penalty. Default is False.",
+    )
     main(parser.parse_args())
