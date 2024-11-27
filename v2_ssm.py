@@ -250,7 +250,6 @@ def format_output_single(ddg, S, threshold=-0.5):
     """Converts raw SSM predictions into nice format for analysis"""
     ALPHABET = 'ACDEFGHIKLMNPQRSTVWYX'
     ddg = ddg.cpu().detach().numpy()
-    L, AA = ddg.shape
     ddg = ddg[:, :20]
 
     keep_L, keep_AA = np.where(ddg <= threshold)
@@ -323,22 +322,20 @@ def format_output_epistatic(ddg, S, pos, wtAA, mutAA, threshold=-0.5):
     return ddg, mut_list
 
 
-def run_epistatic_ssm(args, cfg, model):
+def run_epistatic_ssm(pdb, cfg, model, 
+                      distance, threshold, batch_size):
     """Run epistatic model on double mutations """
 
     model.eval()
     model.cuda()
     stime = time.time()
 
-    # parse PDB
-    chains = get_chains(args.pdb, args.chains)
-
-    pdb = custom_parse_PDB(args.pdb, input_chain_list=chains)
-    pdb[0]['mutation'] = Mutation([0], ['A'], ['A'], [0.], '') # placeholder mutation to keep featurization from throwing error
+    # placeholder mutation to keep featurization from throwing error
+    pdb['mutation'] = Mutation([0], ['A'], ['A'], [0.], '') 
 
     # featurize input
     device = 'cuda'
-    batch = tied_featurize_mut(pdb)
+    batch = tied_featurize_mut([pdb])
     X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask = batch
 
     X = X.to(device)
@@ -355,17 +352,17 @@ def run_epistatic_ssm(args, cfg, model):
     all_mpnn_hid, mpnn_embed, _, mpnn_edges = model.prot_mpnn(X, S, mask, chain_M, residue_idx, chain_encoding_all)
 
     # grab double mutation inputs
-    MUT_POS, MUT_WT_AA, MUT_MUT_AA = get_ssm_mutations_double(pdb[0], args.distance)
-    dataset = SSMDataset(MUT_POS, MUT_WT_AA, MUT_MUT_AA)
-    loader = DataLoader(dataset, shuffle=False, batch_size=args.batch_size, num_workers=8)
+    MUT_POS, MUT_WT_AA, MUT_MUT_AA = get_ssm_mutations_double(pdb, distance)
+    # dataset = SSMDataset(MUT_POS, MUT_WT_AA, MUT_MUT_AA)
+    # loader = DataLoader(dataset, shuffle=False, batch_size=args.batch_size, num_workers=8)
 
-    preds = run_double(all_mpnn_hid, mpnn_embed, cfg, loader, args, model, X, mask, mpnn_edges)
-    ddg, mutations = format_output_epistatic(preds, S, MUT_POS, MUT_WT_AA, MUT_MUT_AA, args.threshold)
+    # preds = run_double(all_mpnn_hid, mpnn_embed, cfg, loader, args, model, X, mask, mpnn_edges)
+    # ddg, mutations = format_output_epistatic(preds, S, MUT_POS, MUT_WT_AA, MUT_MUT_AA, args.threshold)
     
-    etime = time.time()
-    elapsed = etime - stime
-    print(f'ThermoMPNN double mutant epistatic model predictions generated in {round(elapsed, 2)} seconds.')
-    return ddg, mutations
+    # etime = time.time()
+    # elapsed = etime - stime
+    # print(f'ThermoMPNN double mutant epistatic model predictions generated in {round(elapsed, 2)} seconds.')
+    # return ddg, mutations
 
 
 
@@ -484,7 +481,8 @@ def main(args):
             ddg, mutations = format_output_double(ddg, S, args.threshold)
 
     elif args.mode == 'epistatic':
-        ddg, mutations = run_epistatic_ssm(args, cfg, model)
+        ddg, mutations = run_epistatic_ssm(pdb_data, cfg, model, 
+                                           args.distance, args.threshold, args.batch_size)
 
     else:
         raise ValueError
