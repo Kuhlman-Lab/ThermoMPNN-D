@@ -4,8 +4,25 @@ import re
 
 from omegaconf import OmegaConf
 from Bio.PDB import PDBParser
+from scipy.spatial.distance import cdist
+from tqdm import tqdm
 
 from thermompnn.train_thermompnn import parse_cfg
+from thermompnn.trainer.v2_trainer import TransferModelPLv2, TransferModelPLv2Siamese
+
+
+def get_model(mode, config):
+    cwd = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    
+    if (mode.lower() == 'single') or (mode.lower() == 'additive'):
+        model_path = os.path.join(cwd, 'model_weights/ThermoMPNN-ens1.ckpt')
+        return TransferModelPLv2.load_from_checkpoint(model_path, cfg=config).model
+    
+    elif mode.lower() == 'epistatic':
+        model_path = os.path.join(cwd, 'model_weights/ThermoMPNN-D-ens1.ckpt')
+        return TransferModelPLv2Siamese.load_from_checkpoint(model_path, cfg=config).model
+    else:
+        raise ValueError(f"Invalid model mode {mode.lower()} specified")
 
 
 def get_chains(pdb_file, chain_list):
@@ -45,6 +62,23 @@ def get_config(mode):
     )
 
     return parse_cfg(config)
+
+
+
+def get_dmat(pdb):
+    """Get LxL dmat from PDB"""
+
+    # get distance matrix
+    coords = [k for k in pdb.keys() if k.startswith('coords_chain_')]
+    # compile all-by-all coords into big matrix
+    coo_all = []
+    for coord in coords:
+      ch = coord.split('_')[-1]
+      coo = np.stack(pdb[coord][f'CA_chain_{ch}']) # [L, 3]
+      coo_all.append(coo)
+    coo_all = np.concatenate(coo_all) # [L_total, 3]
+    dmat = cdist(coo_all, coo_all)
+    return dmat
 
 
 def custom_parse_PDB_biounits(x, atoms=['N', 'CA', 'C'], chain=None):
@@ -98,7 +132,7 @@ def custom_parse_PDB_biounits(x, atoms=['N', 'CA', 'C'], chain=None):
                 resi = line[17:17 + 3]
                 resn = line[22:22 + 5].strip()
 
-                # TODO check for gaps and add them if needed
+                # Check for gaps and add them if needed
                 if (resn not in resn_list) and len(resn_list) > 0:
                   _, num, ins_code = re.split(r'(\d+)', resn)
                   _, num_prior, ins_code_prior = re.split(r'(\d+)', resn_list[-1])
@@ -190,7 +224,6 @@ def custom_parse_PDB(path_to_pdb, input_chain_list=None, ca_only=False, side_cha
             xyz, seq, resn_list = custom_parse_PDB_biounits(biounit, atoms=sidechain_atoms, chain=letter)
             if resn_list != 'no_chain':
               my_dict['resn_list_' + letter] = resn_list
-                  # my_dict['resn_list'] = list(resn_list)
             if type(xyz) != str:
                 concat_seq += seq[0]
                 my_dict['seq_chain_' + letter] = seq[0]
@@ -208,12 +241,9 @@ def custom_parse_PDB(path_to_pdb, input_chain_list=None, ca_only=False, side_cha
                 s += 1
 
         fi = biounit.rfind("/")
-        # if mut_chain is None:
-          # my_dict['resn_list'] = list(resn_list)
         my_dict['name'] = biounit[(fi + 1):-4]
         my_dict['num_of_chains'] = s
         my_dict['seq'] = concat_seq
-        # my_dict['resn_list'] = list(resn_list)
         if s <= len(chain_alphabet):
             pdb_dict_list.append(my_dict)
             c += 1
@@ -233,3 +263,47 @@ def idx_to_pdb_num(pdb, poslist):
       offset += idx + 1
 
   return [converter[pos] for pos in poslist]
+
+
+def distance_filter(df, args):
+    """filter df based on pdb distances"""
+    # parse PDB
+    chains = get_chains(args.pdb, args.chains)
+
+    pdb = custom_parse_PDB(args.pdb, input_chain_list=chains)[0]
+
+    # grab positions
+    df[['mut1', 'mut2']] = df['Mutation'].str.split(':', n=2, expand=True)
+    df['pos1'] = df['mut1'].str[1:-1].astype(int) - 1
+    df['pos2'] = df['mut2'].str[1:-1].astype(int) - 1
+
+    # get distance matrix
+    coords = [k for k in pdb.keys() if k.startswith('coords_chain_')]
+    # compile all-by-all coords into big matrix
+    coo_all = []
+    for coord in coords:
+      ch = coord.split('_')[-1]
+      coo = np.stack(pdb[coord][f'CA_chain_{ch}']) # [L, 3]
+      coo_all.append(coo)
+    coo_all = np.concatenate(coo_all) # [L_total, 3]
+    dmat = cdist(coo_all, coo_all)
+
+    # filter df based on positions
+    pos1, pos2 = df['pos1'].values, df['pos2'].values
+    dist_list = []
+    for p1, p2 in tqdm(zip(pos1, pos2)):
+        dist_list.append(dmat[p1, p2])
+
+    df['CA-CA Distance'] = dist_list
+    df = df.loc[df['CA-CA Distance'] <= args.distance]
+    df['CA-CA Distance'] = df['CA-CA Distance'].round(2)
+
+    df = df[['ddG (kcal/mol)', 'Mutation', 'CA-CA Distance']].reset_index(drop=True)
+    print('Distance matrix generated.')
+    return df
+
+
+def load_pdb(fname, chainlist):
+    chains = get_chains(fname, chainlist)
+    pdb = custom_parse_PDB(fname, input_chain_list=chains)[0]
+    return pdb

@@ -10,15 +10,14 @@ import time
 from torch.utils.data import DataLoader
 from scipy.spatial.distance import cdist
 
-from thermompnn.trainer.v2_trainer import TransferModelPLv2, TransferModelPLv2Siamese
 
 from thermompnn.datasets.v2_datasets import tied_featurize_mut
 from thermompnn.datasets.dataset_utils import Mutation
 from thermompnn.model.v2_model import batched_index_select, _dist
-from thermompnn.ssm_utils import get_chains, get_config, custom_parse_PDB, idx_to_pdb_num
+from thermompnn.ssm_utils import get_chains, get_config, custom_parse_PDB, idx_to_pdb_num, get_model, load_pdb
 
 
-def get_ssm_mutations_double(pdb):
+def get_ssm_mutations_double(pdb, dthresh):
     # make mutation list for SSM run
     ALPHABET = 'ACDEFGHIKLMNPQRSTVWYX'
     MUT_POS, MUT_WT = [], []
@@ -31,9 +30,12 @@ def get_ssm_mutations_double(pdb):
         else:
             MUT_WT.append('-')
 
-    # get all positional combos except self-combos
-    from itertools import product
-    pos_combos = [p for p in product(MUT_POS, MUT_POS) if p[0] != p[1]]
+    # Use distance filter BEFORE data setup / inference for speedup
+    from thermompnn.ssm_utils import get_dmat
+    dmat = np.triu(get_dmat(pdb)) # [L, L]
+    mask = (dmat < dthresh) & (dmat > 0.0)
+    pos1, pos2 = np.where(mask)
+    pos_combos = [(p1, p2) for p1, p2 in zip(pos1, pos2)]
     pos_combos = np.array(pos_combos) # [combos, 2]
     wtAA = np.zeros_like(pos_combos)
     # fill in wtAA for each pos combo
@@ -182,22 +184,19 @@ class SSMDataset(torch.utils.data.Dataset):
         return self.POS[index, :], self.WTAA[index, :], self.MUTAA[index, :]
 
 
-def run_single_ssm(args, cfg, model):
+def run_single_ssm(pdb, cfg, model):
     """Runs single-mutant SSM sweep with ThermoMPNN v2"""
 
     model.eval()
     model.cuda()
     stime = time.time()
-
-    # parse PDB
-    chains = get_chains(args.pdb, args.chains)
-
-    pdb = custom_parse_PDB(args.pdb, input_chain_list=chains)
-    pdb[0]['mutation'] = Mutation([0], ['A'], ['A'], [0.], '') # placeholder mutation to keep featurization from throwing error
+    
+    # placeholder mutation to keep featurization from throwing error
+    pdb['mutation'] = Mutation([0], ['A'], ['A'], [0.], '')
 
     # featurize input
     device = 'cuda'
-    batch = tied_featurize_mut(pdb)
+    batch = tied_featurize_mut([pdb])
     X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask = batch
 
     X = X.to(device)
@@ -227,9 +226,8 @@ def run_single_ssm(args, cfg, model):
     ddg = ddg - wt_ddg.expand(-1, 21) # [L, 21]
     etime = time.time()
     elapsed = etime - stime
-    pdb_name = os.path.basename(args.pdb)
     length = ddg.shape[0]
-    print(f'ThermoMPNN single mutant predictions generated for protein {pdb_name} of length {length} in {round(elapsed, 2)} seconds.')
+    print(f'ThermoMPNN single mutant predictions generated for protein of length {length} in {round(elapsed, 2)} seconds.')
     return ddg, S
 
 
@@ -357,7 +355,7 @@ def run_epistatic_ssm(args, cfg, model):
     all_mpnn_hid, mpnn_embed, _, mpnn_edges = model.prot_mpnn(X, S, mask, chain_M, residue_idx, chain_encoding_all)
 
     # grab double mutation inputs
-    MUT_POS, MUT_WT_AA, MUT_MUT_AA = get_ssm_mutations_double(pdb[0])
+    MUT_POS, MUT_WT_AA, MUT_MUT_AA = get_ssm_mutations_double(pdb[0], args.distance)
     dataset = SSMDataset(MUT_POS, MUT_WT_AA, MUT_MUT_AA)
     loader = DataLoader(dataset, shuffle=False, batch_size=args.batch_size, num_workers=8)
 
@@ -369,43 +367,6 @@ def run_epistatic_ssm(args, cfg, model):
     print(f'ThermoMPNN double mutant epistatic model predictions generated in {round(elapsed, 2)} seconds.')
     return ddg, mutations
 
-
-def distance_filter(df, args):
-    """filter df based on pdb distances"""
-    # parse PDB
-    chains = get_chains(args.pdb, args.chains)
-
-    pdb = custom_parse_PDB(args.pdb, input_chain_list=chains)[0]
-
-    # grab positions
-    df[['mut1', 'mut2']] = df['Mutation'].str.split(':', n=2, expand=True)
-    df['pos1'] = df['mut1'].str[1:-1].astype(int) - 1
-    df['pos2'] = df['mut2'].str[1:-1].astype(int) - 1
-
-    # get distance matrix
-    coords = [k for k in pdb.keys() if k.startswith('coords_chain_')]
-    # compile all-by-all coords into big matrix
-    coo_all = []
-    for coord in coords:
-      ch = coord.split('_')[-1]
-      coo = np.stack(pdb[coord][f'CA_chain_{ch}']) # [L, 3]
-      coo_all.append(coo)
-    coo_all = np.concatenate(coo_all) # [L_total, 3]
-    dmat = cdist(coo_all, coo_all)
-
-    # filter df based on positions
-    pos1, pos2 = df['pos1'].values, df['pos2'].values
-    dist_list = []
-    for p1, p2 in tqdm(zip(pos1, pos2)):
-        dist_list.append(dmat[p1, p2])
-
-    df['CA-CA Distance'] = dist_list
-    df = df.loc[df['CA-CA Distance'] <= args.distance]
-    df['CA-CA Distance'] = df['CA-CA Distance'].round(2)
-
-    df = df[['ddG (kcal/mol)', 'Mutation', 'CA-CA Distance']].reset_index(drop=True)
-    print(f'Distance matrix generated.')
-    return df
 
 
 def renumber_pdb(df, args):
@@ -509,23 +470,20 @@ def disulfide_penalty(df, pdb_file, chain_list, model):
 def main(args):
 
     cfg = get_config(args.mode)
+    model = get_model(args.mode, cfg)
+    pdb_data = load_pdb(args.pdb, args.chains)
+    pdbname = os.path.basename(args.pdb)
+    print(f'Loaded PDB {pdbname}')
+
     if (args.mode == 'single') or (args.mode == 'additive'):
-        cwd = os.path.dirname(os.path.realpath(__file__))
-        model_path = os.path.join(cwd, 'model_weights/ThermoMPNN-ens1.ckpt')
-        model = TransferModelPLv2.load_from_checkpoint(model_path, cfg=cfg).model
-        
-        # output: [L, 21]
-        ddg, S = run_single_ssm(args, cfg, model)
+        ddg, S = run_single_ssm(pdb_data, cfg, model)
 
-        if args.mode == 'additive':
-            ddg, mutations = format_output_double(ddg, S, args.threshold)
-        else:
+        if args.mode == 'single':
             ddg, mutations = format_output_single(ddg, S, args.threshold)
-    elif args.mode == 'epistatic':
-        cwd = os.path.dirname(os.path.realpath(__file__))
-        model_path = os.path.join(cwd, 'model_weights/ThermoMPNN-D-ens1.ckpt')
-        model = TransferModelPLv2Siamese.load_from_checkpoint(model_path, cfg=cfg).model
+        else:
+            ddg, mutations = format_output_double(ddg, S, args.threshold)
 
+    elif args.mode == 'epistatic':
         ddg, mutations = run_epistatic_ssm(args, cfg, model)
 
     else:
@@ -536,8 +494,8 @@ def main(args):
         'Mutation': mutations
     })
 
-    if args.mode != 'single':
-        df = distance_filter(df, args)
+    # if args.mode != 'single':
+        # df = distance_filter(df, args)
     
     if args.ss_penalty:
         df = disulfide_penalty(df, args.pdb, args.chains, model=args.mode)
