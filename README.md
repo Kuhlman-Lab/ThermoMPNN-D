@@ -2,7 +2,7 @@
 
 ![ThermoMPNN-D](./images/ThermoMPNN-D.svg)
 
-This work is an extension of ThermoMPNN (https://github.com/Kuhlman-Lab/ThermoMPNN), which is itself an extension of ProteinMPNN (https://github.com/dauparas/ProteinMPNN). For details, see our manuscript [here](https://www.biorxiv.org/content/10.1101/2024.08.20.608844v1).
+This work is an extension of ThermoMPNN (https://github.com/Kuhlman-Lab/ThermoMPNN), which is itself an extension of ProteinMPNN (https://github.com/dauparas/ProteinMPNN). For details, see our manuscript [here](https://doi.org/10.1002/pro.70003).
 
 To try out ThermoMPNN-D right in your browser, use the Colab notebook at [this link](https://colab.research.google.com/github/Kuhlman-Lab/ThermoMPNN-D/blob/main/ThermoMPNN-D.ipynb).
 
@@ -83,15 +83,16 @@ This work is made available under an MIT license (see LICENSE file for details).
 
 If this work is useful to you, please use the following citation:
 ```
-@article {Dieckhaus2024.08.20.608844,
-	author = {Dieckhaus, Henry and Kuhlman, Brian},
-	title = {Protein stability models fail to capture epistatic interactions of double point mutations},
-    journal = {bioRxiv},
-	elocation-id = {2024.08.20.608844},
-	year = {2024},
-	doi = {10.1101/2024.08.20.608844},
-	publisher = {Cold Spring Harbor Laboratory},
-	URL = {https://www.biorxiv.org/content/early/2024/08/21/2024.08.20.608844},
-	eprint = {https://www.biorxiv.org/content/early/2024/08/21/2024.08.20.608844.full.pdf},
+@article{https://doi.org/10.1002/pro.70003,
+author = {Dieckhaus, Henry and Kuhlman, Brian},
+title = {Protein stability models fail to capture epistatic interactions of double point mutations},
+journal = {Protein Science},
+volume = {34},
+number = {1},
+pages = {e70003},
+doi = {https://doi.org/10.1002/pro.70003},
+url = {https://onlinelibrary.wiley.com/doi/abs/10.1002/pro.70003},
+eprint = {https://onlinelibrary.wiley.com/doi/pdf/10.1002/pro.70003},
+year = {2025}
 }
 ```
