@@ -37,7 +37,7 @@ We provide a script called ```v2_ssm.py``` which does inference on all possible 
 
 There is an important option called ```--threshold``` which dictates which mutations will get saved to disk. By default, ThermoMPNN will only save stabilizing mutations (ddG <= -0.5 kcal/mol), since this is fastest for saving to disk. To get all the mutations, including destabilizing mutations, set --threshold very high (e.g., 100).
 
-The other useful option is ```--distance``` which is used for additive or epistatic predictions. This is the distance threshold used to filter for "nearby" residues that are likely to have epistatic interactions. A smaller value will lead to stricter filtering. Default is 15 A (based on Ca-Ca distance).
+The other useful option is ```--distance``` which is used for additive or epistatic predictions. This is the distance threshold used to filter for "nearby" residues that are likely to have epistatic interactions. A smaller value will lead to stricter filtering. Default is 5 A (based on Ca-Ca distance).
 
 #### Single mutant model
 This is an updated version of single mutant ThermoMPNN that uses fewer parameters and proper batched inference for faster prediction. It should give similar results to the previously published ThermoMPNN models.
