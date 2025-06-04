@@ -8,7 +8,6 @@ from tqdm import tqdm
 from copy import deepcopy
 from itertools import permutations
 import itertools
-from sklearn.preprocessing import minmax_scale
 
 from thermompnn.protein_mpnn_utils import alt_parse_PDB, parse_PDB
 from thermompnn.datasets.dataset_utils import Mutation, seq1_index_to_seq2_index, ALPHABET
