@@ -41,19 +41,27 @@ The other useful option is ```--distance``` which is used for additive or epista
 #### Single mutant model
 This is an updated version of single mutant ThermoMPNN that uses fewer parameters and proper batched inference for faster prediction. It should give similar results to the previously published ThermoMPNN models.
 
-```python v2_ssm.py --mode single --pdb 1VII.pdb --batch_size 256 --out 1VII```
+```python v2_ssm.py --mode single --pdb 1VII.pdb --batch_size 256 --out 1VII_single```
 
 #### Additive double mutant model
 This sums the individual contributions from each single mutation without attempting to quantify epistatic coupling terms. Inference is faster than with the epistatic model since it just needs to add the terms rather than predict each one separately.
 
-```python v2_ssm.py --mode additive --pdb 1VII.pdb --batch_size 256 --out 1VII```
+```python v2_ssm.py --mode additive --pdb 1VII.pdb --batch_size 256 --out 1VII_additive```
 
 #### Epistatic double mutant model
 This model attempts to capture epistatic interactions between double mutations, which requires running inference on every individual mutation. This is slower than the single or additive model but is still reasonably fast (<1 minute) due to some vectorizing and batching tricks.
 
-```python v2_ssm.py --mode additive --pdb examples/pdbs/1VII.pdb --batch_size 2048 --out 1VII```
+```python v2_ssm.py --mode additive --pdb examples/pdbs/1VII.pdb --batch_size 2048 --out 1VII_epi```
 
 Note the higher batch size, which takes advantage of the lightweight prediction head to significantly speed up inference.
+
+#### Indel mutatation model
+This is an experimental version of single mutant ThermoMPNN that includes predictions for single residue  insertion (insA and insG) and deletion mutations. It is a slightly modified version of single mutant ThermoMPNN trained with single + indel mutations from the Megascale dataset.
+
+```
+git checkout ThermoMPNN-I
+python v2_ssm.py --mode indel --pdb 1VII.pdb --batch_size 256 --out 1VII_indel
+```
 
 ### Benchmarking
 To repeat the benchmarks in the ThermoMPNN-D paper, see the ```benchmarks.ipynb``` notebook. 

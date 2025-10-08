@@ -1,5 +1,6 @@
 import argparse
 import os
+import string
 import torch
 import numpy as np
 import pandas as pd
@@ -8,7 +9,8 @@ from tqdm import tqdm
 import time
 from torch.utils.data import DataLoader
 from scipy.spatial.distance import cdist
-
+from copy import deepcopy
+import re
 from thermompnn.trainer.v2_trainer import TransferModelPLv2, TransferModelPLv2Siamese
 from thermompnn.train_thermompnn import parse_cfg
 
@@ -29,6 +31,9 @@ def get_config(mode):
 
     elif mode == 'epistatic':
         aux = os.path.join(os.path.join(current_location), 'examples/configs/epistatic.yaml')
+    elif mode == 'indel':
+        aux = os.path.join(os.path.join(current_location), 'examples/configs/indel.yaml')
+
     else:
         raise ValueError("Invalid mode selected!")
 
@@ -258,6 +263,130 @@ def run_single_ssm(args, cfg, model):
     return ddg, S
 
 
+class SSMIndelDataset(torch.utils.data.Dataset):
+  def __init__(self, pdb_data, alphabet):
+    self.pdb_data = pdb_data
+    self.alphabet = alphabet
+    # configure SSM dataframe to run
+
+    mut_list = []
+    true_ids = []
+    for pos, wtAA in enumerate(self.pdb_data['seq']):
+      if wtAA in alphabet:
+        for mutAA in alphabet:
+          mut_info = f'{wtAA}{pos + 1}{mutAA}'
+          mut_list.append(mut_info)
+          true_ids.append(self.pdb_data['resn_list'][pos])
+
+    self.df = pd.DataFrame({
+        'mut_info': mut_list,
+        'pos_PDB': true_ids
+    })
+
+  def __len__(self):
+    return self.df.shape[0]
+
+  def __getitem__(self, index):
+    row = self.df.iloc[index]
+    wtAA = row.mut_info[0]
+    mutAA = row.mut_info[-1]
+    pos = int(row.mut_info[1:-1]) - 1
+
+    sample = deepcopy(self.pdb_data)
+    sample['mutation'] = Mutation([pos], [wtAA], [mutAA], None, '')
+
+    return sample
+
+
+def run_indel_ssm(args, cfg, model):
+    """Runs single-mutant + indel SSM sweep with ThermoMPNN v2"""
+
+    model.eval()
+    model.cuda()
+    stime = time.time()
+
+    # parse PDB
+    if args.chain is not None:
+        chains = [args.chain]
+    else:
+        chains = None
+
+    pdb = alt_parse_PDB(args.pdb, input_chain_list=chains)[0]
+    alphabet = 'ACDEFGHIKLMNPQRSTVWYXZag'
+
+    num_total_res = len(pdb['seq'])
+    print(f'Loaded {num_total_res} residues for inference')
+    
+    ds = SSMIndelDataset(pdb, alphabet)
+    dl = DataLoader(ds, batch_size=args.batch_size, shuffle=False,
+                    collate_fn=lambda b: tied_featurize_mut(b, side_chains=False, indels=True))
+
+    preds = []
+    # Run MPNN trunk once for shared features
+    batch = tied_featurize_mut([dl.dataset[0]], side_chains=False, indels=True)
+    X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask = batch
+    device = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
+    X = X.to(device)
+    S = S.to(device)
+    S_out = S.squeeze(0).cpu()
+    mask = mask.to(device)
+    lengths = torch.Tensor(lengths).to(device)
+    chain_M = chain_M.to(device)
+    chain_encoding_all = chain_encoding_all.to(device)
+    residue_idx = residue_idx.to(device)
+    mut_positions = mut_positions.to(device)
+    mut_wildtype_AAs = mut_wildtype_AAs.to(device)
+    mut_mutant_AAs = mut_mutant_AAs.to(device)
+    mut_ddGs = mut_ddGs.to(device)
+    atom_mask = torch.Tensor(atom_mask).to(device)
+
+    X = torch.nan_to_num(X, nan=0.0)
+    all_mpnn_hid, mpnn_embed, _, mpnn_edges = model.prot_mpnn(X, S, mask, chain_M, residue_idx, chain_encoding_all)
+
+    # prep residue-wise embeddings all-at-once
+    all_mpnn_hid = torch.cat(all_mpnn_hid[:2], -1)
+    embeds_all = [all_mpnn_hid, mpnn_embed]
+    mpnn_embed = torch.cat(embeds_all, -1) # [1, L, 384, ]
+    mpnn_embed = mpnn_embed.expand(dl.batch_size, -1, -1)
+
+    for batch in tqdm(dl):
+        X, S, mask, lengths, chain_M, chain_encoding_all, residue_idx, mut_positions, mut_wildtype_AAs, mut_mutant_AAs, mut_ddGs, atom_mask = batch
+        mut_positions = mut_positions.to(device)
+        mut_wildtype_AAs = mut_wildtype_AAs.to(device)
+        mut_mutant_AAs = mut_mutant_AAs.to(device)
+        mut_ddGs = mut_ddGs.to(device)
+        atom_mask = torch.Tensor(atom_mask).to(device)
+
+        # vectorized indexing of the embeddings (this is very ugly but the best I can do for now)
+        mut_positions_m1 = torch.clip(mut_positions - 1, min=0) # need to clip to prevent negative index at first position
+        # only get nextdoor features for insertions, skip it for others
+        ins_mask = mut_mutant_AAs > 21
+        e1 = torch.gather(mpnn_embed, 1, mut_positions.unsqueeze(-1).expand(mut_positions.size(0), mut_positions.size(1), mpnn_embed.size(2)))
+        e2 = torch.gather(mpnn_embed, 1, mut_positions_m1.unsqueeze(-1).expand(mut_positions.size(0), mut_positions.size(1), mpnn_embed.size(2)))
+        e1[ins_mask] = (e1[ins_mask] + e2[ins_mask]) / 2.
+        current_embed = e1
+
+        # Light Attention layer
+        current_embed = torch.squeeze(current_embed, 1) # final shape: (batch, embed_dim)
+        current_embed = torch.unsqueeze(current_embed, -1)  # shape for LA input: (batch, embed_dim, seq_length=1)
+        current_embed = model.light_attention(current_embed)  # shape for LA output: (batch, embed_dim)
+
+        ddg = model.ddg_out(current_embed)  # shape: (batch, 21 + 3)
+        pred = torch.gather(ddg, 1, mut_mutant_AAs)
+
+        identity_mask = mut_mutant_AAs == mut_wildtype_AAs
+        pred[identity_mask] = 0.0
+        preds += list(torch.squeeze(pred, dim=-1).detach().cpu())
+
+    ddg = np.squeeze(preds)
+    etime = time.time()
+    elapsed = etime - stime
+    pdb_name = os.path.basename(args.pdb)
+    length = ddg.shape[0]
+    print(f'ThermoMPNN single mutant + indel predictions generated for protein {pdb_name} of length {length} in {round(elapsed, 2)} seconds.')
+    return ddg, S_out
+
+
 def expand_additive(ddg):
     """Uses torch broadcasting to add all possible single mutants to each other in a vectorized operation."""
     # ddg [L, 21]
@@ -273,22 +402,41 @@ def expand_additive(ddg):
     return ddg
 
 
-def format_output_single(ddg, S, threshold=-0.5):
+def format_output_single(ddg, S, threshold=-0.5, indel=False):
     """Converts raw SSM predictions into nice format for analysis"""
-    ALPHABET = 'ACDEFGHIKLMNPQRSTVWYX'
-    ddg = ddg.cpu().detach().numpy()
-    L, AA = ddg.shape
-    ddg = ddg[:, :20]
 
+    if indel:
+        ALPHABET = 'ACDEFGHIKLMNPQRSTVWYXZag'
+        ddg = torch.tensor(ddg).reshape(-1, len(ALPHABET))
+    else:
+        ALPHABET = 'ACDEFGHIKLMNPQRSTVWYX'
+
+    ddg = ddg.cpu().detach().numpy()
+    
     keep_L, keep_AA = np.where(ddg <= threshold)
     ddg = ddg[ddg <= threshold] # [N, ]
+
+    mutAA_replace = {
+        "Z": "del",
+        "a": "insA",
+        "g": "insG"
+    }
 
     mutlist = []
     for L_idx, AA_idx in tqdm(zip(keep_L, keep_AA)):
         wtAA = ALPHABET[S[L_idx]]
         mutAA = ALPHABET[AA_idx]
+        
+        if mutAA in mutAA_replace.keys():
+            mutAA = mutAA_replace[mutAA]
+
         mutlist.append(wtAA + str(L_idx + 1) + mutAA)
 
+    # Drop X residues
+    mutlist = np.array(mutlist)
+    X_mask = ~np.char.endswith(mutlist, 'X')
+
+    ddg, mutlist = ddg[X_mask], mutlist[X_mask]
     return ddg, mutlist
 
 
@@ -468,17 +616,24 @@ def renumber_pdb(df, args):
 
     else:
         # grab position
-        df['pos'] = df['Mutation'].str[1:-1].astype(int) - 1
+        mut_raw = df['Mutation'].values
+        wtAA_list, pos_list, mutAA_list = [], [], []
+        for mr in mut_raw:
+            wtAA, pos, mutAA = re.findall(r'\D+|\d+', mr)
+            wtAA_list.append(wtAA)
+            pos_list.append(int(pos) - 1)
+            mutAA_list.append(mutAA)
 
-        pos1 = df['pos'].values
+        # pos1 = df['pos'].values
+        pos1 = pos_list
         resn1_list = []
         for p1 in tqdm(pos1):
             resn1 = pdb['resn_list'][p1]
             resn1_list.append(resn1)
 
         df['pos1'] = resn1_list
-        df['wt1'] = df['Mutation'].str[0]
-        df['mt1'] = df['Mutation'].str[-1]
+        df['wt1'] = wtAA_list
+        df['mt1'] = mutAA_list
 
         df['Mutation'] = df['wt1'] + df['pos1'] + df['mt1']   
         df = df[['ddG (kcal/mol)', 'Mutation']].reset_index(drop=True)
@@ -509,6 +664,14 @@ def main(args):
 
         ddg, mutations = run_epistatic_ssm(args, cfg, model)
 
+    elif args.mode == "indel":
+        cwd = os.path.dirname(os.path.realpath(__file__))
+        model_path = os.path.join(cwd, 'model_weights/ThermoMPNN-I.ckpt')
+        model = TransferModelPLv2.load_from_checkpoint(checkpoint_path=model_path, cfg=cfg).model
+
+        ddg, S = run_indel_ssm(args, cfg, model)
+        ddg, mutations = format_output_single(ddg, S, args.threshold, indel=True)
+
     else:
         raise ValueError
 
@@ -517,14 +680,14 @@ def main(args):
         'Mutation': mutations
     })
 
-    if args.mode != 'single':
+    if args.mode not in ['single', 'indel']:
         df = distance_filter(df, args)
 
     df = df.dropna(subset=['ddG (kcal/mol)'])
     if args.threshold <= -0.:
         df = df.sort_values(by=['ddG (kcal/mol)'])
 
-    if args.mode != 'single': # sort to have same output order
+    if args.mode not in ['single', 'indel']: # sort to have same output order
         df[['mut1', 'mut2']] = df['Mutation'].str.split(':', n=2, expand=True)
         df['pos1'] = df['mut1'].str[1:-1].astype(int) + 1
         df['pos2'] = df['mut2'].str[1:-1].astype(int) + 1
@@ -542,7 +705,7 @@ def main(args):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', type=str, help='SSM mode to use (single | additive | epistatic)', default='single')
+    parser.add_argument('--mode', type=str, help='SSM mode to use (single | additive | epistatic | indel)', default='single')
     parser.add_argument('--pdb', type=str, help='PDB file to run', default='./2OCJ.pdb')
     parser.add_argument('--batch_size', type=int, help='batch size for stability prediction module', default=256)
     parser.add_argument('--out', type=str, help='output mutation prefix to save csv', default='ssm')
